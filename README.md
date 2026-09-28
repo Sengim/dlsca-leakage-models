@@ -45,6 +45,12 @@ uv run scripts/sweep.py --dataset_path /path/to/ascad-variable.h5 \
 ```
 Each run draws a random `--n_train` subset of the profiling traces and random small-MLP hyperparameters (layers 2-6, width 32-200, ELU/ReLU/SELU, lr 1e-4..3e-3 log-uniform, batch 128-512; see `SEARCH_SPACE` in the script). Run i uses the same subset and hyperparameters for every leakage model, so comparisons are paired. Outputs go to `results/sweep_ascadr_<time>/`: `summary.csv` (hyperparameters, final GE and traces-to-GE<1 for the final and best-validation-loss model), per-run GE/loss curves, and the training indices of each run.
 
+### Adding leakage models to a finished sweep
+```
+uv run scripts/sweep.py --extend results/sweep_ascadr_<time> --leakage_models "out:4,5" --quiet
+```
+Trains the new leakage models on the sweep's saved training subsets and per-run configs (dataset, validation split and model type come from its `args.json`) and appends to its `summary.csv`, so the new rows are paired with the old ones. (leakage model, run) pairs already in `summary.csv` are skipped, which also makes it a resume for an interrupted sweep. Don't extend a sweep that is still running. `--dataset_path` overrides the saved (possibly relative) path.
+
 ### CNNs (desynchronised traces)
 Both scripts take `--model cnn`, e.g. for `ascad-variable-desync50.h5` (same layout, traces shifted by up to 50 samples):
 ```

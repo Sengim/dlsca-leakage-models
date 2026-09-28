@@ -120,6 +120,9 @@ def get_arguments():
     parser.add_argument("--fix", default=None,
                         help='only train/validate on traces with these label values, e.g. "in:0,1+out:0,1=0"; '
                              "n_train is capped at the number of matching traces")
+    parser.add_argument("--gpu_mem_budget", type=float, default=15.0,
+                        help="GiB per training step; configs that need more train with a halved batch size "
+                             "(summary.csv records the batch size used, args.json the sampled one)")
     parser.add_argument("--quiet", action="store_true", help="don't print per-epoch lines")
     return parser.parse_args()
 
@@ -223,7 +226,10 @@ def main():
         for lm in lms:
             if (lm.spec, i) in done:
                 continue
-            r = train_and_evaluate(ds, lm, train_idx, val_idx, cfg, log=log)
+            r = train_and_evaluate(ds, lm, train_idx, val_idx, cfg, log=log, gpu_mem_budget_gib=args.gpu_mem_budget)
+            if r["batch_size"] != cfg.batch_size:
+                print(f"run {i} ({lm.spec}): batch size {cfg.batch_size} exceeds --gpu_mem_budget "
+                      f"{args.gpu_mem_budget} GiB, trained with {r['batch_size']}")
 
             name = f"{lm.spec.replace(':', '').replace(',', '').replace('+', '_')}_run{i}"
             np.savez(f"{sweep_dir}/{name}.npz", ge_final=r["ge_final"], ge_best=r["ge_best"], **r["history"])
@@ -231,7 +237,7 @@ def main():
                    "run": i, "model": cfg.model,
                    **{k: getattr(cfg, k) for k in ("conv_layers", "filters", "kernel_size", "pool_size")},
                    "layers": cfg.layers, "hidden": cfg.hidden, "activation": cfg.activation,
-                   "lr": f"{cfg.lr:.2e}", "batch_size": cfg.batch_size,
+                   "lr": f"{cfg.lr:.2e}", "batch_size": r["batch_size"],
                    "ge_final": round(float(r["ge_final"][-1]), 2), "ntge_final": r["ntge_final"],
                    "ntge32_final": r["ntge32_final"],
                    "ge_best": round(float(r["ge_best"][-1]), 2), "ntge_best": r["ntge_best"],

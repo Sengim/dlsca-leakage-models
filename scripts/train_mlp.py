@@ -49,6 +49,8 @@ def get_arguments():
     parser.add_argument("--kernel_size", type=int, default=d.kernel_size)
     parser.add_argument("--pool_size", type=int, default=d.pool_size)
     parser.add_argument("--seed", type=int, default=d.seed)
+    parser.add_argument("--gpu_mem_budget", type=float, default=4.0,
+                        help="GiB per training step; if a config needs more, the batch size is halved until it fits")
     args = parser.parse_args()
     args.dataset_path = args.dataset_path or default_path(args.dataset)
     return args
@@ -71,7 +73,9 @@ def main():
     train_idx = select_training_traces(candidates, args.n_train, args.selection,
                                        np.random.default_rng(args.seed), args.indices_file)
 
-    result = train_and_evaluate(ds, lm, train_idx, val_idx, cfg)
+    result = train_and_evaluate(ds, lm, train_idx, val_idx, cfg, gpu_mem_budget_gib=args.gpu_mem_budget)
+    if result["batch_size"] != cfg.batch_size:
+        print(f"Batch size {cfg.batch_size} exceeds --gpu_mem_budget {args.gpu_mem_budget} GiB; trained with {result['batch_size']}")
     print(f"Final model: GE={result['ge_final'][-1]:.2f}, traces to GE<1: {result['ntge_final']}, to GE<32: {result['ntge32_final']}")
     print(f"Best val-loss model (epoch {result['best_epoch']}): GE={result['ge_best'][-1]:.2f}, "
           f"traces to GE<1: {result['ntge_best']}, to GE<32: {result['ntge32_best']}")
@@ -81,7 +85,7 @@ def main():
     result_dir = f"{args.results_root_path}/{args.model}_{args.dataset}_{safe_lm}_{now}"
     os.makedirs(result_dir, exist_ok=True)
     with open(f"{result_dir}/args.json", "w") as f:
-        json.dump({**vars(args), "train_config": asdict(cfg)}, f, indent=2)
+        json.dump({**vars(args), "train_config": asdict(cfg), "batch_size_used": result["batch_size"]}, f, indent=2)
     torch.save(result["state_dict"], f"{result_dir}/model.pt")
     np.savez(f"{result_dir}/metrics.npz", train_idx=train_idx, ge_final=result["ge_final"], ge_best=result["ge_best"],
              **result["history"])

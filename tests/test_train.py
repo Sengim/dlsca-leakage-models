@@ -1,10 +1,11 @@
 import numpy as np
 import pytest
+import torch
 
 from sca_tg.aes import AES_SBOX
 from sca_tg.ascadr import ASCADr, guessing_entropy
 from sca_tg.leakage import parse_leakage_model
-from sca_tg.train import TrainConfig, build_model, train_and_evaluate
+from sca_tg.train import TrainConfig, build_model, fit_batch_size, train_and_evaluate
 
 
 def _leaky_ds(n_prof=3000, n_att=300, seed=0):
@@ -83,3 +84,24 @@ def test_cnn_trains_and_breaks_leaky_data():
 def test_cnn_rejects_pooling_past_input_length():
     with pytest.raises(ValueError):
         build_model(TrainConfig(model="cnn", conv_layers=3, pool_size=4), input_dim=20, num_classes=4)
+
+
+def test_fit_batch_size_leaves_cpu_runs_alone():
+    ds = _leaky_ds()
+    r = train_and_evaluate(ds, parse_leakage_model("HW"), np.arange(2500), np.arange(2500, 3000),
+                           TrainConfig(epochs=1, **CFG), device="cpu", log=LOG, gpu_mem_budget_gib=0)
+    assert r["batch_size"] == CFG["batch_size"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_fit_batch_size_halves_on_gpu_without_touching_the_model():
+    model = build_model(TrainConfig(model="cnn", conv_layers=2, filters=4, kernel_size=3, pool_size=2,
+                                    hidden=16, layers=1), 20, 4).cuda()
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    x, y = torch.randn(512, 20, device="cuda"), torch.randint(0, 4, (512,), device="cuda")
+    loss_fn = torch.nn.CrossEntropyLoss()
+    assert fit_batch_size(model, x, y, loss_fn, 512, budget_gib=10) == 512
+    assert fit_batch_size(model, x, y, loss_fn, 512, budget_gib=1e-9) == 16  # nothing fits: down to the minimum
+    for k, v in model.state_dict().items():  # BatchNorm running stats and weights unchanged by the probe
+        assert torch.equal(v, before[k]), k
+    assert all(p.grad is None for p in model.parameters())

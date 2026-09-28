@@ -66,13 +66,44 @@ def _batched(model, x, batch_size=2048):
     return torch.cat([model(x[i:i + batch_size]) for i in range(0, len(x), batch_size)])
 
 
-def train_and_evaluate(ds, leakage_model, train_idx, val_idx, cfg, device=None, log=print):
+def fit_batch_size(model, x, y, loss_fn, batch_size, budget_gib, min_batch_size=16):
+    """Halve batch_size until one training step (forward + backward) peaks under budget_gib of GPU memory.
+
+    Some CNN shapes make cuDNN pick a convolution algorithm with a huge workspace (e.g. Conv1d 16->32, kernel 51
+    on 140 samples: ~24 MB per trace, 9.5 GiB at batch 400); on Windows/WSL that spills into shared system memory
+    and slows training ~10x. The probe runs on a copy of the model, so the real model (BatchNorm statistics,
+    gradients) and the RNG are untouched, and configs that fit train exactly as without the probe.
+    """
+    if x.device.type != "cuda":
+        return batch_size
+    probe = copy.deepcopy(model).train()
+    while batch_size > min_batch_size:
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(x.device)
+        base = torch.cuda.memory_allocated(x.device)
+        try:
+            loss_fn(probe(x[:batch_size]), y[:batch_size]).backward()
+            fits = torch.cuda.max_memory_allocated(x.device) - base <= budget_gib * 2 ** 30
+        except torch.OutOfMemoryError:
+            fits = False
+        probe.zero_grad(set_to_none=True)
+        if fits:
+            break
+        batch_size //= 2
+    del probe
+    torch.cuda.empty_cache()  # release the probe's workspace instead of keeping it cached
+    return batch_size
+
+
+def train_and_evaluate(ds, leakage_model, train_idx, val_idx, cfg, device=None, log=print, gpu_mem_budget_gib=4.0):
     """Train an MLP or CNN (cfg.model) on ds.x_profiling[train_idx] labelled with leakage_model, then attack ds.x_attack.
 
     Returns a dict with the training history, GE curves and traces-to-GE<1 for both the final model
     and the checkpoint with the lowest validation loss, and the state dict of the final model.
     Both GE curves use the same attack-trace permutations. If training diverged (NaN outputs, or no
     finite validation loss for the best checkpoint), the affected GE curve is all NaN.
+    On GPU, cfg.batch_size is halved until a training step fits in gpu_mem_budget_gib (see fit_batch_size);
+    the batch size actually used is returned as "batch_size".
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
@@ -92,6 +123,10 @@ def train_and_evaluate(ds, leakage_model, train_idx, val_idx, cfg, device=None, 
     model = build_model(cfg, x_train.shape[1], leakage_model.num_classes).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     loss_fn = nn.CrossEntropyLoss()
+    batch_size = fit_batch_size(model, x_train, y_train, loss_fn, cfg.batch_size, gpu_mem_budget_gib)
+    if batch_size != cfg.batch_size:
+        log(f"[{leakage_model}] batch size {cfg.batch_size} needs > {gpu_mem_budget_gib} GiB of GPU memory, "
+            f"using {batch_size}")
 
     history = {"train_loss": [], "val_loss": [], "val_acc": []}
     best_val, best_state, best_epoch = float("inf"), None, -1
@@ -100,8 +135,8 @@ def train_and_evaluate(ds, leakage_model, train_idx, val_idx, cfg, device=None, 
         model.train()
         perm = torch.randperm(len(x_train), device=device, generator=g)
         total, n_batches = 0.0, 0
-        for i in range(0, len(perm), cfg.batch_size):
-            b = perm[i:i + cfg.batch_size]
+        for i in range(0, len(perm), batch_size):
+            b = perm[i:i + batch_size]
             optimizer.zero_grad()
             loss = loss_fn(model(x_train[b]), y_train[b])
             loss.backward()
@@ -145,5 +180,6 @@ def train_and_evaluate(ds, leakage_model, train_idx, val_idx, cfg, device=None, 
         "ge_final": ge_final, "ntge_final": traces_to_ge(ge_final), "ntge32_final": traces_to_ge(ge_final, 32),
         "ge_best": ge_best, "ntge_best": traces_to_ge(ge_best), "ntge32_best": traces_to_ge(ge_best, 32),
         "best_epoch": best_epoch,
+        "batch_size": batch_size,
         "state_dict": final_state,
     }

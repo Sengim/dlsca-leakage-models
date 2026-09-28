@@ -55,6 +55,8 @@ uv run scripts/sweep.py --dataset_path /path/to/ascad-variable.h5 \
 ```
 Each run draws a random `--n_train` subset of the profiling traces and random small-MLP hyperparameters (layers 2-6, width 32-200, ELU/ReLU/SELU, lr 1e-4..3e-3 log-uniform, batch 128-512; see `SEARCH_SPACE` in the script). Run i uses the same subset and hyperparameters for every leakage model, so comparisons are paired. Outputs go to `results/sweep_ascadr_<time>/`: `summary.csv` (hyperparameters, final GE and traces-to-GE<1 for the final and best-validation-loss model), per-run GE/loss curves, and the training indices of each run.
 
+GPU memory: some CNN shapes make cuDNN pick a convolution algorithm with a huge workspace (up to ~12 GiB at batch 512). Before training, each run probes one training step; if it needs more than `--gpu_mem_budget` GiB (default 4, both scripts), the batch size is halved until it fits. `summary.csv` records the batch size used, `args.json` the sampled one.
+
 ### Adding leakage models to a finished sweep
 ```
 uv run scripts/sweep.py --extend results/sweep_ascadr_<time> --leakage_models "out:4,5" --quiet

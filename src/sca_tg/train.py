@@ -168,12 +168,18 @@ def train_and_evaluate(ds, leakage_model, train_idx, val_idx, cfg, device=None, 
                                 np.random.default_rng(cfg.seed))
 
     ge_final = attack()
-    final_state = copy.deepcopy(model.state_dict())
+    final_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
     if best_state is None:
         ge_best = np.full(len(x_attack), np.nan)
     else:
         model.load_state_dict(best_state)
         ge_best = attack()
+
+    # Free everything this run put on the GPU. Otherwise small tensors of the next run land inside cached
+    # blocks (e.g. a ~10 GiB cuDNN workspace) and pin them, and the next large workspace needs a second one.
+    del model, optimizer, best_state, x_train, y_train, x_val, y_val, x_attack, mean, std
+    if device == "cuda" or str(device).startswith("cuda"):
+        torch.cuda.empty_cache()
 
     return {
         "history": {k: np.array(v) for k, v in history.items()},

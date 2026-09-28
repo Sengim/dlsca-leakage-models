@@ -31,7 +31,7 @@ def ge_floor(lm):
         if src == "out":
             out_term = True  # S-box output labels separate all key guesses in practice
         else:
-            in_bits |= set(range(8)) if transform in ("ID", "HW") else set(transform)
+            in_bits |= set(range(8)) if isinstance(transform, str) else set(transform)  # ID / HW / HW3: all bits
     return 0.0 if out_term else (2 ** (8 - len(in_bits)) - 1) / 2
 
 
@@ -60,9 +60,10 @@ def main():
         curves[m] = np.array([x for x in c if np.isfinite(x).all()])  # drop diverged runs
     models.sort(key=lambda m: np.median(curves[m][:, -1]))
 
-    ncols = 4
+    ncols = min(4, len(models))
     nrows = -(-len(models) // ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(3.3 * ncols, 2.7 * nrows), sharex=True, sharey=True)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.3 * ncols, 2.7 * nrows), sharex=True, sharey=True,
+                             squeeze=False)
     color = COLORS[args.checkpoint]
     n = curves[models[0]].shape[1]
     x = np.arange(1, n + 1)

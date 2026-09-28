@@ -16,6 +16,13 @@ def test_id_and_hw_match_classic_labels():
     assert parse_leakage_model("HW").num_classes == 9
 
 
+def test_hw3_buckets_low_med_high():
+    lm = parse_leakage_model("HW3")
+    hw = HW[AES_SBOX[P ^ K]]
+    assert (lm(P, K) == np.where(hw < 4, 0, np.where(hw == 4, 1, 2))).all()
+    assert lm.num_classes == 3 and np.bincount(lm(P, K)).tolist() == [93, 70, 93]
+
+
 def test_bits():
     lm = parse_leakage_model("out:0,1")
     assert lm.num_classes == 4

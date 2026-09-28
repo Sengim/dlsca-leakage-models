@@ -22,6 +22,7 @@ Example:
 import argparse
 import csv
 import json
+import os
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
@@ -41,10 +42,20 @@ def score(ge, ntge, n_attack, threshold=1):
     return ntge / n_attack if ge < threshold else 1 + ge / 256
 
 
+DATASET_NAMES = {"ascadr": "ASCADr", "eshard": "eShard", "ches_ctf": "CHES CTF"}
+
+
+def title_prefix(sweep_args):
+    """e.g. "ASCADr (ascad-variable-desync50.h5), CNN"; sweeps from before --dataset/--model are ASCADr MLPs."""
+    name = DATASET_NAMES[sweep_args.get("dataset", "ascadr")]
+    return f"{name} ({os.path.basename(sweep_args['dataset_path'])}), {sweep_args.get('model', 'mlp').upper()}"
+
+
 def load(sweep_dir):
-    """data[leakage_model][(threshold, checkpoint)] -> list of scores."""
+    """data[leakage_model][(threshold, checkpoint)] -> list of scores, plus the sweep's args.json."""
     with open(f"{sweep_dir}/args.json") as f:
-        n_attack = json.load(f)["n_attack"]
+        sweep_args = json.load(f)
+    n_attack = sweep_args["n_attack"]
     data = defaultdict(lambda: defaultdict(list))
     with open(f"{sweep_dir}/summary.csv") as f:
         for row in csv.DictReader(f):
@@ -57,7 +68,7 @@ def load(sweep_dir):
                     if threshold != 1 and not ge < threshold:
                         ntge, ge = np.nan, np.nan  # only runs that reach the threshold get a second point
                     data[row["leakage_model"]][(threshold, which)].append(score(ge, ntge, n_attack, threshold))
-    return data, n_attack
+    return data, n_attack, sweep_args
 
 
 def half_violin(ax, values, x, side, color, hollow=False, width=0.8):
@@ -115,7 +126,7 @@ def main():
                         help="output path without extension (default: <sweep_dir>/violins[_final])")
     args = parser.parse_args()
 
-    data, n_attack = load(args.sweep_dir)
+    data, n_attack, sweep_args = load(args.sweep_dir)
     checkpoints = [("final", "both")] if args.final_only else [("best", "left"), ("final", "right")]
     order_by = checkpoints[0][0]
     models = sorted(data, key=lambda m: -np.nanmedian(data[m][(1, order_by)]))
@@ -168,7 +179,7 @@ def main():
                                   label="GE < 32 (hatched, hollow)"))
     ax.legend(handles=handles, loc="upper right", frameon=False, fontsize=9, labelcolor=INK)
     first = next(iter(data.values()))
-    ax.set_title(f"ASCADr sweep: {len(first[(1, 'final')])} runs per leakage model (random subsets + hyperparameters)",
+    ax.set_title(f"{title_prefix(sweep_args)} sweep: {len(first[(1, 'final')])} runs per leakage model (random subsets + hyperparameters)",
                     color=INK, fontsize=11, loc="left")
 
     out = args.out or f"{args.sweep_dir}/violins{'_final' if args.final_only else ''}"

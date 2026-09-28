@@ -2,3 +2,7 @@
 __pycache__/
 results/
 *.h5
+
+# dataset downloads (the extracted .h5 files are covered by *.h5)
+content
+*.tar

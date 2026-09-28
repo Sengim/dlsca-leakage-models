@@ -1,6 +1,8 @@
 """Loader for ASCAD-variable (ascad-variable.h5), ported from diff_release without the TF dependency.
 
-Traces and metadata are loaded once; labels are computed on demand for any leakage model
+read_ascad_format reads any file in the ASCAD layout (Profiling_traces / Attack_traces, each with
+traces and metadata[plaintext, key, (masks)]); sca_tg.eshard and sca_tg.ches_ctf use it too, and all
+of them return an ASCADr container. Traces and metadata are loaded once; labels are computed on demand for any leakage model
 (see sca_tg.leakage), so a sweep over leakage models does not reload the file.
 """
 
@@ -16,15 +18,15 @@ class ASCADr:
     x_attack: np.ndarray     # (n_attack, n_samples) float32
     profiling_plaintexts: np.ndarray
     profiling_keys: np.ndarray
-    profiling_masks: np.ndarray
+    profiling_masks: np.ndarray | None  # None for files without masks (e.g. CHES CTF)
     attack_plaintexts: np.ndarray
     attack_keys: np.ndarray
-    attack_masks: np.ndarray
+    attack_masks: np.ndarray | None
     target_byte: int
 
     @property
     def correct_key(self):
-        # ASCADr uses a fixed key in the attack set.
+        # The attack set uses a fixed key (checked by read_ascad_format).
         return int(self.attack_keys[0, self.target_byte])
 
     def profiling_labels(self, leakage_model):
@@ -41,20 +43,40 @@ class ASCADr:
         return leakage_model(self.attack_plaintexts[None, :, self.target_byte], guesses)
 
 
-def load_ascadr(file_path, n_profiling=200000, n_attack=10000, target_byte=2, first_sample=0, number_of_samples=1400):
-    window = slice(first_sample, first_sample + number_of_samples)
+def read_ascad_format(file_path, n_profiling=None, n_attack=None, target_byte=2, first_sample=0, number_of_samples=None,
+                      attack_key=None):
+    """Read an ASCAD-layout file. n_profiling / n_attack / number_of_samples = None means all.
+
+    Raises if the attack set's key byte is not fixed, or (if attack_key, a hex string of the full key,
+    is given) differs from attack_key[target_byte].
+    """
+    window = slice(first_sample, None if number_of_samples is None else first_sample + number_of_samples)
     with h5py.File(file_path, "r") as f:
         x_prof = f["Profiling_traces/traces"][:n_profiling, window].astype(np.float32)
         x_att = f["Attack_traces/traces"][:n_attack, window].astype(np.float32)
         meta_prof = f["Profiling_traces/metadata"][:n_profiling]
         meta_att = f["Attack_traces/metadata"][:n_attack]
 
+    key_bytes = meta_att["key"][:, target_byte]
+    if not (key_bytes == key_bytes[0]).all():
+        raise ValueError(f"{file_path}: attack key byte {target_byte} is not fixed")
+    if attack_key is not None and key_bytes[0] != bytes.fromhex(attack_key)[target_byte]:
+        raise ValueError(f"{file_path}: attack key byte {target_byte} is {key_bytes[0]:#04x}, "
+                         f"expected {bytes.fromhex(attack_key)[target_byte]:#04x}")
+
+    def masks(meta):
+        return meta["masks"] if "masks" in meta.dtype.names else None
+
     return ASCADr(
         x_profiling=x_prof, x_attack=x_att,
-        profiling_plaintexts=meta_prof["plaintext"], profiling_keys=meta_prof["key"], profiling_masks=meta_prof["masks"],
-        attack_plaintexts=meta_att["plaintext"], attack_keys=meta_att["key"], attack_masks=meta_att["masks"],
+        profiling_plaintexts=meta_prof["plaintext"], profiling_keys=meta_prof["key"], profiling_masks=masks(meta_prof),
+        attack_plaintexts=meta_att["plaintext"], attack_keys=meta_att["key"], attack_masks=masks(meta_att),
         target_byte=target_byte,
     )
+
+
+def load_ascadr(file_path, n_profiling=200000, n_attack=10000, target_byte=2, first_sample=0, number_of_samples=1400):
+    return read_ascad_format(file_path, n_profiling, n_attack, target_byte, first_sample, number_of_samples)
 
 
 def guessing_entropy(log_probs, labels_key_hypothesis, correct_key, n_experiments=100, rng=None):

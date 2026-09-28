@@ -10,6 +10,7 @@ Example:
     uv run scripts/sweep.py --dataset_path /path/to/ascad-variable.h5 \
         --leakage_models ID HW "out:0,1" "out:2,3,4,5,6,7" "in:0,1+out:0,1" --n_runs 8 --quiet
     uv run scripts/sweep.py --dataset_path /path/to/ascad-variable-desync50.h5 --model cnn --n_runs 8 --quiet
+    uv run scripts/sweep.py --dataset eshard --dataset_path /path/to/eshard.h5 --n_runs 8 --quiet
 
 --extend <sweep_dir> trains extra leakage models on an existing sweep's saved subsets and per-run configs
 (everything else is read from its args.json) and appends to its summary.csv. (leakage model, run) pairs
@@ -26,7 +27,7 @@ from datetime import datetime
 
 import numpy as np
 
-from sca_tg.ascadr import load_ascadr
+from sca_tg.datasets import DATASETS, default_path, load_dataset
 from sca_tg.leakage import parse_leakage_model
 from sca_tg.selection import parse_fix, restrict_to_fixed
 from sca_tg.train import TrainConfig, train_and_evaluate
@@ -97,8 +98,10 @@ def get_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--extend", default=None, metavar="SWEEP_DIR",
                         help="add --leakage_models to an existing sweep (other options are read from its args.json)")
+    parser.add_argument("--dataset", default="ascadr", choices=list(DATASETS))
     parser.add_argument("--dataset_path", default=None,
-                        help="default: $ASCADR_PATH or ascad-variable.h5; with --extend, the sweep's own dataset_path")
+                        help="default: see sca_tg.datasets ($ASCADR_PATH or ascad-variable.h5 for ascadr); "
+                             "with --extend, the sweep's own dataset_path")
     parser.add_argument("--results_root_path", default="results")
     parser.add_argument("--n_profiling", type=int, default=190000)
     parser.add_argument("--n_attack", type=int, default=10000)
@@ -129,7 +132,8 @@ def summary_fields(model):
 
 
 def load_validation(args):
-    ds = load_ascadr(args.dataset_path, n_profiling=args.n_profiling, n_attack=args.n_attack, target_byte=args.target_byte)
+    ds = load_dataset(args.dataset, args.dataset_path, n_profiling=args.n_profiling, n_attack=args.n_attack,
+                      target_byte=args.target_byte)
     n_candidates = len(ds.x_profiling) - args.n_validation
     val_idx = restrict_to_fixed(ds, np.arange(n_candidates, len(ds.x_profiling)), args.fix)
     return ds, val_idx, n_candidates
@@ -137,19 +141,24 @@ def load_validation(args):
 
 def new_sweep(args):
     """Create a sweep dir and draw its runs. Returns (sweep_dir, ds, val_idx, runs, fields, done)."""
-    args.dataset_path = args.dataset_path or os.environ.get("ASCADR_PATH", "ascad-variable.h5")
+    args.dataset_path = args.dataset_path or default_path(args.dataset)
     args.leakage_models = args.leakage_models or DEFAULT_LEAKAGE_MODELS
-    now = datetime.now().strftime("%d_%m_%Y_%H_%M_%S")
-    sweep_dir = f"{args.results_root_path}/sweep_ascadr_{now}"
-    os.makedirs(sweep_dir, exist_ok=True)
-
-    ds, val_idx, n_candidates = load_validation(args)
+    ds, val_idx, n_candidates = load_validation(args)  # before creating the sweep dir, so a bad path leaves nothing behind
+    # record what was actually loaded (smaller datasets, e.g. CHES CTF, have fewer traces than the defaults)
+    for k, x in (("n_profiling", ds.x_profiling), ("n_attack", ds.x_attack)):
+        if len(x) < getattr(args, k):
+            print(f"{args.dataset} has only {len(x)} traces for {k}={getattr(args, k)}; using {len(x)}")
+            setattr(args, k, len(x))
     candidates = restrict_to_fixed(ds, np.arange(n_candidates), args.fix)
     n_train = min(args.n_train, len(candidates))
     if args.fix:
         print(f"--fix {args.fix}: {len(candidates)} training candidates, {len(val_idx)} validation traces")
     if n_train < args.n_train:
         print(f"WARNING: only {len(candidates)} training candidates, using n_train={n_train} instead of {args.n_train}")
+
+    now = datetime.now().strftime("%d_%m_%Y_%H_%M_%S")
+    sweep_dir = f"{args.results_root_path}/sweep_{args.dataset}_{now}"
+    os.makedirs(sweep_dir, exist_ok=True)
 
     # Draw all runs up front so they are identical across leakage models.
     rng = np.random.default_rng(args.seed)
@@ -179,6 +188,7 @@ def extend_sweep(args):
         setattr(args, k, saved[k])
     args.dataset_path = dataset_path or args.dataset_path
     args.model = saved.get("model", "mlp")  # sweeps from before --model are MLP sweeps
+    args.dataset = saved.get("dataset", "ascadr")  # ... and ASCADr sweeps
 
     runs = [(i, np.load(f"{sweep_dir}/train_idx_run{i}.npy"), TrainConfig(**c)) for i, c in enumerate(saved["runs"])]
     with open(f"{sweep_dir}/summary.csv", newline="") as f:
@@ -192,7 +202,7 @@ def extend_sweep(args):
 
     ds, val_idx, _ = load_validation(args)
     todo = sum((lm, i) not in done for lm in new_lms for i, _, _ in runs)
-    print(f"Extending {sweep_dir} ({args.model}, {args.dataset_path}): {todo} runs to train, "
+    print(f"Extending {sweep_dir} ({args.model}, {args.dataset} at {args.dataset_path}): {todo} runs to train, "
           f"{len(new_lms) * len(runs) - todo} already in summary.csv")
     return sweep_dir, ds, val_idx, runs, fields, done
 

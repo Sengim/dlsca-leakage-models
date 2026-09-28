@@ -3,6 +3,7 @@
 Example:
     uv run scripts/train_mlp.py --dataset_path /path/to/ascad-variable.h5 --leakage_model "out:0,1" --n_train 50000
     uv run scripts/train_mlp.py --dataset_path /path/to/ascad-variable-desync50.h5 --model cnn --n_train 50000
+    uv run scripts/train_mlp.py --dataset ches_ctf --dataset_path /path/to/ches_ctf.h5 --n_train 20000
 """
 
 import argparse
@@ -14,7 +15,7 @@ from datetime import datetime
 import numpy as np
 import torch
 
-from sca_tg.ascadr import load_ascadr
+from sca_tg.datasets import DATASETS, default_path, load_dataset
 from sca_tg.leakage import parse_leakage_model
 from sca_tg.selection import restrict_to_fixed, select_training_traces
 from sca_tg.train import TrainConfig, train_and_evaluate
@@ -23,7 +24,9 @@ from sca_tg.train import TrainConfig, train_and_evaluate
 def get_arguments():
     d = TrainConfig()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset_path", default=os.environ.get("ASCADR_PATH", "ascad-variable.h5"))
+    parser.add_argument("--dataset", default="ascadr", choices=list(DATASETS))
+    parser.add_argument("--dataset_path", default=None,
+                        help="default: see sca_tg.datasets ($ASCADR_PATH or ascad-variable.h5 for ascadr)")
     parser.add_argument("--results_root_path", default="results")
     parser.add_argument("--n_profiling", type=int, default=190000, help="profiling traces loaded (train candidates + validation)")
     parser.add_argument("--n_attack", type=int, default=10000)
@@ -46,7 +49,9 @@ def get_arguments():
     parser.add_argument("--kernel_size", type=int, default=d.kernel_size)
     parser.add_argument("--pool_size", type=int, default=d.pool_size)
     parser.add_argument("--seed", type=int, default=d.seed)
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.dataset_path = args.dataset_path or default_path(args.dataset)
+    return args
 
 
 def main():
@@ -56,7 +61,8 @@ def main():
                       layers=args.layers, seed=args.seed, model=args.model, conv_layers=args.conv_layers,
                       filters=args.filters, kernel_size=args.kernel_size, pool_size=args.pool_size)
 
-    ds = load_ascadr(args.dataset_path, n_profiling=args.n_profiling, n_attack=args.n_attack, target_byte=args.target_byte)
+    ds = load_dataset(args.dataset, args.dataset_path, n_profiling=args.n_profiling, n_attack=args.n_attack,
+                      target_byte=args.target_byte)
     n_candidates = len(ds.x_profiling) - args.n_validation
     val_idx = restrict_to_fixed(ds, np.arange(n_candidates, len(ds.x_profiling)), args.fix)
     candidates = restrict_to_fixed(ds, np.arange(n_candidates), args.fix)
@@ -72,7 +78,7 @@ def main():
 
     now = datetime.now().strftime("%d_%m_%Y_%H_%M_%S")
     safe_lm = args.leakage_model.replace(":", "").replace(",", "").replace("+", "_")
-    result_dir = f"{args.results_root_path}/{args.model}_ascadr_{safe_lm}_{now}"
+    result_dir = f"{args.results_root_path}/{args.model}_{args.dataset}_{safe_lm}_{now}"
     os.makedirs(result_dir, exist_ok=True)
     with open(f"{result_dir}/args.json", "w") as f:
         json.dump({**vars(args), "train_config": asdict(cfg)}, f, indent=2)

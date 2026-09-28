@@ -17,6 +17,14 @@ https://static.data.gouv.fr/resources/ascad-atmega-8515-variable-key/20190903-08
 
 Note: the paper uses a 20k-sample window of the raw traces resampled to 2000 points, not this 1400-sample extracted window.
 
+### eShard and CHES CTF
+The extracted `eshard.h5` (1400 samples, masked AES) and `ches_ctf.h5` (2200 samples, no masks in the metadata) from the NeurIPS paper use the same ASCAD layout, labels `Sbox[p^k]` and a fixed attack key. Pick them with `--dataset` in both scripts:
+```
+uv run scripts/sweep.py --dataset eshard --dataset_path /path/to/eshard.h5 --n_runs 8 --quiet
+uv run scripts/train_mlp.py --dataset ches_ctf --dataset_path /path/to/ches_ctf.h5 --n_train 20000
+```
+Loaders are in `src/sca_tg/{eshard,ches_ctf}.py` (all return the same container as ASCADr) and check that the attack key byte matches the dataset's known key, so pointing `--dataset` at the wrong file fails. These sets are smaller than ASCADr: `--n_profiling` / `--n_attack` are capped at what the file has, and the sweep records the actual counts in `args.json`. The last `--n_validation` loaded profiling traces are still used for validation.
+
 ## Leakage models
 Specified as strings (see `src/sca_tg/leakage.py`): terms `<in|out>:<ID|HW|bit list>` joined by `+`.
 

@@ -1,4 +1,4 @@
-"""MLP training loop shared by the single-run and sweep scripts."""
+"""MLP / CNN training loop shared by the single-run and sweep scripts."""
 
 import copy
 from dataclasses import dataclass
@@ -21,6 +21,12 @@ class TrainConfig:
     activation: str = "elu"
     seed: int = 0
     ge_experiments: int = 100
+    # "mlp", or "cnn" = conv blocks followed by an MLP head (hidden x layers), for desynchronised traces.
+    model: str = "mlp"
+    conv_layers: int = 2
+    filters: int = 8  # doubled after every conv block
+    kernel_size: int = 11
+    pool_size: int = 2
 
 
 ACTIVATIONS = {"elu": nn.ELU, "relu": nn.ReLU, "selu": nn.SELU}
@@ -34,12 +40,34 @@ def mlp(input_dim, num_classes, hidden, layers, activation="elu"):
     return nn.Sequential(*blocks, nn.Linear(d, num_classes))
 
 
-def _batched(model, x, batch_size=8192):
+def cnn(input_dim, num_classes, conv_layers, filters, kernel_size, pool_size, hidden, layers, activation="elu"):
+    """Conv1d -> activation -> BatchNorm -> AvgPool blocks (filters doubling per block), then an MLP head."""
+    blocks, c, n = [nn.Unflatten(1, (1, input_dim))], 1, input_dim
+    for i in range(conv_layers):
+        out_c = filters * 2 ** i
+        blocks += [nn.Conv1d(c, out_c, kernel_size, padding="same"), ACTIVATIONS[activation](),
+                   nn.BatchNorm1d(out_c), nn.AvgPool1d(pool_size)]
+        c, n = out_c, n // pool_size
+    if n < 1:
+        raise ValueError(f"{conv_layers} pooling layers of size {pool_size} leave no samples of {input_dim}")
+    return nn.Sequential(*blocks, nn.Flatten(), mlp(c * n, num_classes, hidden, layers, activation))
+
+
+def build_model(cfg, input_dim, num_classes):
+    if cfg.model == "mlp":
+        return mlp(input_dim, num_classes, cfg.hidden, cfg.layers, cfg.activation)
+    if cfg.model == "cnn":
+        return cnn(input_dim, num_classes, cfg.conv_layers, cfg.filters, cfg.kernel_size, cfg.pool_size,
+                   cfg.hidden, cfg.layers, cfg.activation)
+    raise ValueError(f"unknown model {cfg.model!r}")
+
+
+def _batched(model, x, batch_size=2048):
     return torch.cat([model(x[i:i + batch_size]) for i in range(0, len(x), batch_size)])
 
 
 def train_and_evaluate(ds, leakage_model, train_idx, val_idx, cfg, device=None, log=print):
-    """Train an MLP on ds.x_profiling[train_idx] labelled with leakage_model, then attack ds.x_attack.
+    """Train an MLP or CNN (cfg.model) on ds.x_profiling[train_idx] labelled with leakage_model, then attack ds.x_attack.
 
     Returns a dict with the training history, GE curves and traces-to-GE<1 for both the final model
     and the checkpoint with the lowest validation loss, and the state dict of the final model.
@@ -61,7 +89,7 @@ def train_and_evaluate(ds, leakage_model, train_idx, val_idx, cfg, device=None, 
     x_val, y_val = prep(ds.x_profiling[val_idx]), y_prof[val_idx].to(device)
     x_attack = prep(ds.x_attack)
 
-    model = mlp(x_train.shape[1], leakage_model.num_classes, cfg.hidden, cfg.layers, cfg.activation).to(device)
+    model = build_model(cfg, x_train.shape[1], leakage_model.num_classes).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     loss_fn = nn.CrossEntropyLoss()
 

@@ -45,6 +45,13 @@ uv run scripts/sweep.py --dataset_path /path/to/ascad-variable.h5 \
 ```
 Each run draws a random `--n_train` subset of the profiling traces and random small-MLP hyperparameters (layers 2-6, width 32-200, ELU/ReLU/SELU, lr 1e-4..3e-3 log-uniform, batch 128-512; see `SEARCH_SPACE` in the script). Run i uses the same subset and hyperparameters for every leakage model, so comparisons are paired. Outputs go to `results/sweep_ascadr_<time>/`: `summary.csv` (hyperparameters, final GE and traces-to-GE<1 for the final and best-validation-loss model), per-run GE/loss curves, and the training indices of each run.
 
+### CNNs (desynchronised traces)
+Both scripts take `--model cnn`, e.g. for `ascad-variable-desync50.h5` (same layout, traces shifted by up to 50 samples):
+```
+uv run scripts/sweep.py --dataset_path /path/to/ascad-variable-desync50.h5 --model cnn --n_runs 8 --epochs 50 --quiet
+```
+The CNN is 1-4 blocks of Conv1d -> activation -> BatchNorm -> AvgPool (filters doubling per block), then an MLP head. The sweep samples conv blocks, first-block filters 4-32, kernel 5-51, pool 2-10 and a 1-3 layer head (see `CNN_SEARCH_SPACE`); with `train_mlp.py` set them via `--conv_layers --filters --kernel_size --pool_size`.
+
 `train_mlp.py` defaults follow the paper's ASCADr model (6x100, ELU, Adam lr 5e-4, batch 400, 100 epochs).
 
 ## Tests

@@ -4,7 +4,7 @@ import pytest
 from sca_tg.aes import AES_SBOX
 from sca_tg.ascadr import ASCADr, guessing_entropy
 from sca_tg.leakage import parse_leakage_model
-from sca_tg.train import TrainConfig, train_and_evaluate
+from sca_tg.train import TrainConfig, build_model, train_and_evaluate
 
 
 def _leaky_ds(n_prof=3000, n_att=300, seed=0):
@@ -71,3 +71,15 @@ def test_ge_matches_naive_reference():
 def test_nan_scores_give_nan_ge():
     kh = np.zeros((256, 4), dtype=np.int64)
     assert np.isnan(guessing_entropy(np.full((4, 9), np.nan), kh, 0, n_experiments=2)).all()
+
+
+def test_cnn_trains_and_breaks_leaky_data():
+    ds, lm = _leaky_ds(), parse_leakage_model("out:0,1")
+    cfg = TrainConfig(epochs=8, model="cnn", conv_layers=2, filters=4, kernel_size=3, pool_size=2, **CFG)
+    r = train_and_evaluate(ds, lm, np.arange(2500), np.arange(2500, 3000), cfg, device="cpu", log=LOG)
+    assert r["ge_final"][-1] < 1
+
+
+def test_cnn_rejects_pooling_past_input_length():
+    with pytest.raises(ValueError):
+        build_model(TrainConfig(model="cnn", conv_layers=3, pool_size=4), input_dim=20, num_classes=4)

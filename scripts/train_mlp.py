@@ -1,7 +1,8 @@
-"""Train a single MLP on ASCAD-variable and report guessing entropy.
+"""Train a single MLP (or CNN, --model cnn) on ASCAD-variable and report guessing entropy.
 
 Example:
     uv run scripts/train_mlp.py --dataset_path /path/to/ascad-variable.h5 --leakage_model "out:0,1" --n_train 50000
+    uv run scripts/train_mlp.py --dataset_path /path/to/ascad-variable-desync50.h5 --model cnn --n_train 50000
 """
 
 import argparse
@@ -38,7 +39,12 @@ def get_arguments():
     parser.add_argument("--batch_size", type=int, default=d.batch_size)
     parser.add_argument("--lr", type=float, default=d.lr)
     parser.add_argument("--hidden", type=int, default=d.hidden)
-    parser.add_argument("--layers", type=int, default=d.layers)
+    parser.add_argument("--layers", type=int, default=d.layers, help="dense layers (the CNN's head with --model cnn)")
+    parser.add_argument("--model", default=d.model, choices=["mlp", "cnn"])
+    parser.add_argument("--conv_layers", type=int, default=d.conv_layers)
+    parser.add_argument("--filters", type=int, default=d.filters, help="filters of the first conv block, doubled per block")
+    parser.add_argument("--kernel_size", type=int, default=d.kernel_size)
+    parser.add_argument("--pool_size", type=int, default=d.pool_size)
     parser.add_argument("--seed", type=int, default=d.seed)
     return parser.parse_args()
 
@@ -47,7 +53,8 @@ def main():
     args = get_arguments()
     lm = parse_leakage_model(args.leakage_model)
     cfg = TrainConfig(epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, hidden=args.hidden,
-                      layers=args.layers, seed=args.seed)
+                      layers=args.layers, seed=args.seed, model=args.model, conv_layers=args.conv_layers,
+                      filters=args.filters, kernel_size=args.kernel_size, pool_size=args.pool_size)
 
     ds = load_ascadr(args.dataset_path, n_profiling=args.n_profiling, n_attack=args.n_attack, target_byte=args.target_byte)
     n_candidates = len(ds.x_profiling) - args.n_validation
@@ -65,7 +72,7 @@ def main():
 
     now = datetime.now().strftime("%d_%m_%Y_%H_%M_%S")
     safe_lm = args.leakage_model.replace(":", "").replace(",", "").replace("+", "_")
-    result_dir = f"{args.results_root_path}/mlp_ascadr_{safe_lm}_{now}"
+    result_dir = f"{args.results_root_path}/{args.model}_ascadr_{safe_lm}_{now}"
     os.makedirs(result_dir, exist_ok=True)
     with open(f"{result_dir}/args.json", "w") as f:
         json.dump({**vars(args), "train_config": asdict(cfg)}, f, indent=2)

@@ -14,8 +14,10 @@ Example:
 
 --extend <sweep_dir> trains extra leakage models on an existing sweep's saved subsets and per-run configs
 (everything else is read from its args.json) and appends to its summary.csv. (leakage model, run) pairs
-already in summary.csv are skipped, so it also resumes an interrupted sweep. Don't extend a running sweep.
+already in summary.csv are skipped. Without --leakage_models it continues the sweep's own leakage models,
+i.e. resumes a stopped or interrupted sweep. Don't extend a running sweep.
     uv run scripts/sweep.py --extend results/sweep_ascadr_27_09_2026_19_17_52 --leakage_models "out:4,5" --quiet
+    uv run scripts/sweep.py --extend results/sweep_ascadr_28_09_2026_08_50_36 --quiet  # resume
 """
 
 import argparse
@@ -97,7 +99,8 @@ def sample_cnn_config(rng, epochs, seed, input_dim=1400):
 def get_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--extend", default=None, metavar="SWEEP_DIR",
-                        help="add --leakage_models to an existing sweep (other options are read from its args.json)")
+                        help="add --leakage_models to an existing sweep, or without --leakage_models resume it "
+                             "(other options are read from its args.json)")
     parser.add_argument("--dataset", default="ascadr", choices=list(DATASETS))
     parser.add_argument("--dataset_path", default=None,
                         help="default: see sca_tg.datasets ($ASCADR_PATH or ascad-variable.h5 for ascadr); "
@@ -108,7 +111,7 @@ def get_arguments():
     parser.add_argument("--n_validation", type=int, default=10000)
     parser.add_argument("--target_byte", type=int, default=2)
     parser.add_argument("--leakage_models", nargs="+", default=None,
-                        help=f"default: {' '.join(DEFAULT_LEAKAGE_MODELS)}; required with --extend")
+                        help=f"default: {' '.join(DEFAULT_LEAKAGE_MODELS)}; with --extend, the sweep's own")
     parser.add_argument("--n_train", type=int, default=20000)
     parser.add_argument("--model", default="mlp", choices=["mlp", "cnn"])
     parser.add_argument("--n_runs", type=int, default=8, help="random (subset, hyperparameter) draws per leakage model")
@@ -118,10 +121,7 @@ def get_arguments():
                         help='only train/validate on traces with these label values, e.g. "in:0,1+out:0,1=0"; '
                              "n_train is capped at the number of matching traces")
     parser.add_argument("--quiet", action="store_true", help="don't print per-epoch lines")
-    args = parser.parse_args()
-    if args.extend and not args.leakage_models:
-        parser.error("--extend needs --leakage_models")
-    return args
+    return parser.parse_args()
 
 
 def summary_fields(model):
@@ -182,7 +182,7 @@ def extend_sweep(args):
     sweep_dir = args.extend
     with open(f"{sweep_dir}/args.json") as f:
         saved = json.load(f)
-    new_lms = args.leakage_models
+    new_lms = args.leakage_models = args.leakage_models or saved["leakage_models"]  # none given: resume
     dataset_path = args.dataset_path
     for k in ("dataset_path", "n_profiling", "n_attack", "n_validation", "target_byte", "fix", "seed"):
         setattr(args, k, saved[k])
@@ -209,11 +209,13 @@ def extend_sweep(args):
 
 def main():
     args = get_arguments()
-    lms = [parse_leakage_model(s) for s in args.leakage_models or DEFAULT_LEAKAGE_MODELS]  # fail before loading
+    for s in args.leakage_models or []:
+        parse_leakage_model(s)  # fail before loading
     if args.fix:
         parse_fix(args.fix)
 
     sweep_dir, ds, val_idx, runs, fields, done = (extend_sweep if args.extend else new_sweep)(args)
+    lms = [parse_leakage_model(s) for s in args.leakage_models]  # filled in by new_sweep / extend_sweep
     summary_path = f"{sweep_dir}/summary.csv"
 
     log = (lambda *_: None) if args.quiet else print

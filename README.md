@@ -59,7 +59,7 @@ Each run draws a random `--n_train` subset of the profiling traces and random sm
 ```
 uv run scripts/sweep.py --extend results/sweep_ascadr_<time> --leakage_models "out:4,5" --quiet
 ```
-Trains the new leakage models on the sweep's saved training subsets and per-run configs (dataset, validation split and model type come from its `args.json`) and appends to its `summary.csv`, so the new rows are paired with the old ones. (leakage model, run) pairs already in `summary.csv` are skipped, which also makes it a resume for an interrupted sweep. Don't extend a sweep that is still running. `--dataset_path` overrides the saved (possibly relative) path.
+Trains the new leakage models on the sweep's saved training subsets and per-run configs (dataset, validation split and model type come from its `args.json`) and appends to its `summary.csv`, so the new rows are paired with the old ones. (leakage model, run) pairs already in `summary.csv` are skipped. Without `--leakage_models` it continues the sweep's own leakage models, i.e. resumes a stopped or interrupted sweep (`uv run scripts/sweep.py --extend results/sweep_<...> --quiet`). Don't extend a sweep that is still running. `--dataset_path` overrides the saved (possibly relative) path.
 
 ### CNNs (desynchronised traces)
 Both scripts take `--model cnn`, e.g. for `ascad-variable-desync50.h5` (same layout, traces shifted by up to 50 samples):

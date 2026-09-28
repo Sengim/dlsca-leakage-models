@@ -1,13 +1,13 @@
 # Training on targeted leakage models: first results
 
-*Status: 2026-09-28. Three sweeps complete: MLPs on ASCADr (100 runs × 7 leakage models), CNNs on ASCADr desync50 (100 runs × 6 leakage models) and MLPs on eShard (100 runs × 3 leakage models). `HW3` runs on the two ASCADr sweeps are in progress.*
+*Status: 2026-09-28. Three sweeps complete: MLPs on ASCADr (100 runs × 8 leakage models), CNNs on ASCADr desync50 (100 runs × 7 leakage models) and MLPs on eShard (100 runs × 3 leakage models).*
 
 ## TL;DR
 
 - **Training on just the two S-box output LSBs (`out:0,1`) works better than any other label we tried, in both settings.** On ASCADr, 90/100 random MLPs break the key with it (median ~1.5k attack traces), versus 0/100 with ID labels at the same budget (20k profiling traces, 30 epochs). On desync50 with CNNs, everything is much harder, but `out:0,1` still breaks the key most often (18/100) and has by far the lowest median GE.
 - **It is the specific bits, not the number of classes.** `out:2,3` is also a 4-class label, trained on identical data and hyperparameters, and only 18/100 MLP runs break the key. Dropping the LSBs (`out:2,3,4,5,6,7`) leaves 4/100.
 - **The S-box input bits only ever get us to GE < 32, and adding them to `out:0,1` makes attacks worse.** That first part is expected: they depend on 2 key bits, so they can only find the right group of 64 keys. The surprise is the joint 16-class `out:0,1+in:0,1` label: it breaks the key less often than `out:0,1` alone (MLP 43 vs 90/100, CNN 12 vs 18/100) and is *slower* when both succeed (42 of 43 MLP runs). Our working hypothesis is that the much easier input-share feature starves learning of the output bits (see [Takeaways](#takeaways)).
-- **The same idea works on eShard with Hamming weights.** The paper found that eShard networks first learn to tell high from low Hamming weights. Training directly on that coarse 3-class label (`HW3`: low / med / high HW) breaks eShard in 79/100 MLP runs, against 30/100 for HW and 2/100 for ID, and wins 90/100 paired runs against HW.
+- **The same idea works on eShard with Hamming weights.** The paper found that eShard networks first learn to tell high from low Hamming weights. Training directly on that coarse 3-class label (`HW3`: low / med / high HW) breaks eShard in 79/100 MLP runs, against 30/100 for HW and 2/100 for ID, and wins 90/100 paired runs against HW. On ASCADr MLPs it is second only to `out:0,1` (81/100, against 29 for HW); on desync CNNs it either breaks the key or ends up confidently wrong.
 - **Many desync CNNs are confidently wrong:** their GE ends *above* 128, i.e. worse than a random guess. This affects 75/100 joint-label models and none of the HW models, and also half of the ID-trained eShard MLPs. It is not understood yet.
 - **Open:** the data-efficiency question needs a sweep over the number of profiling traces, and the broader question of whether different leakage models make networks learn *different internal representations* has not been tested yet (see [Next steps](#next-steps)).
 
@@ -47,7 +47,7 @@ Labels that only use S-box *input* bits depend on only some key bits, so several
 | | ASCADr MLP sweep | ASCADr desync50 CNN sweep | eShard MLP sweep |
 |---|---|---|---|
 | dataset | `ascad-variable.h5` (1400 samples) | `ascad-variable-desync50.h5` (1400 samples) | `eshard.h5` (1400 samples) |
-| leakage models | 7 (+ `HW3` in progress) | 6 (+ `HW3` in progress) | ID, HW, `HW3` |
+| leakage models | 8 | 7 | ID, HW, `HW3` |
 | runs | 100 | 100 | 100 |
 | training traces | 20k random subset of 180k | 20k random subset of 180k | 30k random subset of 80k |
 | validation | last 10k profiling traces | last 10k profiling traces | last 10k profiling traces |
@@ -68,6 +68,7 @@ All sweeps also sample the activation (ELU/ReLU/SELU), the Adam learning rate (1
 | leakage model | classes | runs | GE<1 final | traces to GE<1 (median) | GE<32 final | traces to GE<32 (median) | median final GE | GE<1 best ckpt | median best epoch |
 |---|---|---|---|---|---|---|---|---|---|
 | `out:0,1` | 4 | 100 | 90 | 1466 | 94 | 318 | 0.0 | 27 | 1 |
+| `HW3` | 3 | 100 | 81 | 1889 | 91 | 456 | 0.0 | 9 | 1 |
 | `out:0,1+in:0,1` | 16 | 100 | 43 | 2458 | 84 | 54 | 1.0 | 6 | 1 |
 | `HW` | 9 | 100 | 29 | 3102 | 68 | 1350 | 5.5 | 0 | 1 |
 | `out:2,3` | 4 | 100 | 18 | 2989 | 74 | 1509 | 6.0 | 1 | 0 |
@@ -81,6 +82,7 @@ Paired against `out:0,1` (same subset and hyperparameters, final epoch, compared
 
 | leakage model | runs | `out:0,1` better | other better |
 |---|---|---|---|
+| `HW3` | 100 | 74 | 26 |
 | `out:0,1+in:0,1` | 100 | 97 | 3 |
 | `HW` | 100 | 97 | 3 |
 | `out:2,3` | 100 | 96 | 4 |
@@ -103,6 +105,8 @@ Paired against `out:0,1` (same subset and hyperparameters, final epoch, compared
 **Necessity: mostly.** Excluding the two LSBs (`out:2,3,4,5,6,7`) leaves 4/100 successful runs, close to ID. ID contains the LSBs but fails completely at this budget (0/100 to GE < 1, 23/100 to GE < 32). So having the right information in the label isn't enough; with 20k traces, a 256-class target seems to be too hard for these small MLPs to learn the LSB structure from.
 
 **Input bits are the easiest thing to learn, but combining them hurts.** `in:0,1` reaches its floor in 99/100 runs with a median of 43 traces, faster than anything else. The joint `out:0,1+in:0,1` label benefits from this for GE < 32 (84/100, median 54 traces), but it breaks the full key less often than `out:0,1` alone (43 vs 90/100) and loses 97/100 paired runs. See [Takeaways](#takeaways) for why this is surprising and what might cause it.
+
+**Coarse Hamming weights work here too.** `HW3` (low / med / high HW, see the eShard section) breaks ASCADr in 81/100 runs, against 29 for full HW, and beats HW in 86/100 paired runs. It is second only to `out:0,1`, which beats it in 74/100 paired runs and is faster in 57 of the 78 runs where both break the key (median 1459 vs 1878 traces).
 
 **Selecting checkpoints by validation loss fails for MLPs.** The best-validation-loss epoch is 0–1 for almost every run and leakage model, so that checkpoint is essentially untrained (27/100 successful runs for `out:0,1`, against 90 at the final epoch). Validation loss is a poor proxy for attack performance here, which is why the main figure shows the final epoch. The split version below shows both checkpoints.
 
@@ -127,6 +131,7 @@ Paired against `out:0,1` (same subset and hyperparameters, final epoch, compared
 | `in:0,1` | 4 | 0* | – | 51 | 31.5 | 0* | 34 | 127.5 | 50 | 26 |
 | `out:2,3,4,5,6,7` | 64 | 1 | 9342 | 17 | 130.9 | 0 | 5 | 154.6 | 64 | 3 |
 | `out:0,1+in:0,1` | 16 | 12 | 2736 | 23 | 155.0 | **12** | 19 | 194.5 | 75 | 19 |
+| `HW3` | 3 | 14 | 2840 | 15 | 219.8 | 11 | 11 | 222.0 | 89 | 22 |
 
 \* `in:0,1` cannot reach GE < 1 (floor 31.5), and its GE moves in steps of 64 (31.5, 95.5, 159.5, …) because the 64 tied key guesses are always ranked as a block. All 100 runs per leakage model.
 
@@ -139,6 +144,7 @@ Paired against `out:0,1`, for each checkpoint:
 | `out:0,1+in:0,1` | 68 / 32 | 82 / 18 |
 | `out:2,3,4,5,6,7` | 68 / 32 | 78 / 22 |
 | `ID` | 63 / 37 | 69 / 31 |
+| `HW3` | 83 / 17 | 90 / 10 |
 
 ![GE curves of the best val-loss checkpoint, CNN sweep](figures/cnn_desync50_ge_curves_best.png)
 
@@ -152,10 +158,11 @@ Paired against `out:0,1`, for each checkpoint:
 ### What this says
 
 - **Desync50 at 20k traces is hard.** No label is reliable. The best is `out:0,1`, with 18/100 runs reaching GE < 1 at the final epoch (median ~2.1k attack traces) and 12/100 at the best checkpoint.
-- **`out:0,1` is still the strongest label.** It has the lowest median GE (34 at the best checkpoint; the next best, HW, is at 80) and the most runs below GE 32 (47/100). It wins 65–82 of 100 paired runs at the best checkpoint against every other label.
+- **`out:0,1` is still the strongest label.** It has the lowest median GE (34 at the best checkpoint; the next best, HW, is at 80) and the most runs below GE 32 (47/100). It wins 65–90 of 100 paired runs at the best checkpoint against every other label.
 - **The joint label is bimodal.** Its GE curves either drop below 32 within ~50 traces (19 runs at the best checkpoint, 12 of which go on to break the key), or climb steadily past 128. So it matches `out:0,1` on best-checkpoint GE < 1 (12/100 each) but has the worst median GE of all labels.
 - **HW is the most stable label but rarely breaks the key.** Its GE ends between ~40 and ~130 in almost every run and never above 128 at the best checkpoint. At the final epoch it beats `out:0,1` in 55/100 paired runs, mostly because `out:0,1`'s failures are further off (32/100 end above GE 128, against 3 for HW), not because HW succeeds (3/100 GE < 1).
 - **Checkpoint choice cuts both ways for CNNs.** Validation loss bottoms out mid-training for most labels (median best epoch 17–26). Training on to the final epoch gives `out:0,1` more successes (18 vs 12 runs to GE < 1) but also more badly-off runs (median GE 83 vs 34).
+- **`HW3` is the most extreme case of bimodality.** It breaks the key in 14/100 runs (second only to `out:0,1`'s 18), but 82/100 end confidently wrong at the final epoch, and its median final GE of 220 is the worst of all labels. Full HW, with the same information split more finely, is never above 128 at the best checkpoint.
 - **The input bits are not fast on desync.** `in:0,1` alone needs a median of ~8k traces to reach GE < 32 (51/100 runs), against 43 traces for synchronised MLPs.
 
 ## Results: MLPs on eShard
@@ -190,7 +197,7 @@ Paired against `HW3` (same subset and hyperparameters, final epoch): `HW3` is be
 
 ## Takeaways
 
-**1. `out:0,1` is the best label in both settings, and it is the specific bits that matter.** It wins most paired comparisons on synchronised MLPs (95–99/100) and desynchronised CNNs (65–82/100 at the best checkpoint). The `out:2,3` control on the MLPs rules out the class count as the explanation. On eShard, the analogous coarse label, `HW3` (high vs low Hamming weight, the feature the paper found eShard networks learn first), is similarly dominant: 79/100 runs against 30 for HW. The pattern across both datasets: **a label that asks only for the feature networks learn first beats the standard labels that contain it.**
+**1. `out:0,1` is the best label in both settings, and it is the specific bits that matter.** It wins most paired comparisons on synchronised MLPs (95–99/100, and 74/100 against `HW3`) and desynchronised CNNs (65–90/100 at the best checkpoint). The `out:2,3` control on the MLPs rules out the class count as the explanation. On eShard, the analogous coarse label, `HW3` (high vs low Hamming weight, the feature the paper found eShard networks learn first), is similarly dominant: 79/100 runs against 30 for HW. `HW3` also works on synchronised ASCADr (81/100 against 29 for HW), though not as well as `out:0,1` there. The pattern across both datasets: **a label that asks only for the feature networks learn first beats the standard labels that contain it.**
 
 **2. The input bits can only get the attack to GE < 32. That part is expected.** `in:0,1` is `(p⊕k) & 3`, which depends on only the 2 lowest key bits. However well a model learns it, the likelihood is identical for all 64 keys sharing those bits, so it only picks out the right group of 64. Ranking the correct key within that group needs the output bits, because only the S-box's nonlinearity makes the other 6 key bits matter.
 
@@ -205,7 +212,9 @@ The MLP GE curves fit this. The joint label's median GE drops fast early (28 aft
 
 **5. Checkpoint selection matters and neither choice is right.** Validation loss picks essentially untrained MLPs (epoch 0–1). For CNNs it picks a mid-training epoch that is more reliable but breaks the key less often than the final epoch. A GE-based criterion on a held-out attack set would be fairer to both.
 
-**6. Confidently wrong models are the main open puzzle.** At the best checkpoint, many desync CNNs rank the correct key *worse than random* (GE > 128): 75/100 for the joint label, 64 for `out:2,3,4,5,6,7`, 50 for `in:0,1`, 49 for ID, 21 for `out:0,1` and none for HW. On eShard, 52/100 ID-trained MLPs end above 128 at the final epoch, against 5 for `HW3`. A model without signal would stay around 128, so these models have learned something that systematically points *away* from the correct key on the attack set. That suggests a mismatch between profiling and attack traces that some labels are much more sensitive to. For the joint label, the rising runs are ones where the input bits were not learned: a model that had found the right group of 64 keys could not end much above GE ~63.
+**6. Confidently wrong models are the main open puzzle.** At the best checkpoint, many desync CNNs rank the correct key *worse than random* (GE > 128): 75/100 for the joint label, 64 for `out:2,3,4,5,6,7`, 50 for `in:0,1`, 49 for ID, 21 for `out:0,1` and none for HW. `HW3` is the most affected label on desync (89/100 at the best checkpoint). On eShard, 52/100 ID-trained MLPs end above 128 at the final epoch, against 5 for `HW3`.
+
+One clue: the state also appears early in training for synchronised MLPs that end up breaking the key. Their best-validation checkpoint (epoch 0–1) is above 128 in 43/100 runs for `out:0,1` and 78/100 for `HW3`, against 1 and 4 at the final epoch. So being confidently wrong looks like an early-training state that synchronised MLPs train out of, and that desync CNNs often don't. A model without signal would stay around 128, so these models have learned something that systematically points *away* from the correct key on the attack set. That suggests a mismatch between profiling and attack traces that some labels are much more sensitive to. For the joint label, the rising runs are ones where the input bits were not learned: a model that had found the right group of 64 keys could not end much above GE ~63.
 
 ## Caveats
 
@@ -225,7 +234,7 @@ The MLP GE curves fit this. The joint label's median GE drops fast early (28 aft
    - *Longer training* for a few configs, to see whether the gap is about convergence speed or capacity.
 2. **Understand the confidently wrong CNNs:** check whether the misranking comes from the input-bit or output-bit part of the prediction, and whether it is specific to the fixed-key attack set.
 3. **Data efficiency:** sweep the number of training traces (e.g. 5k, 10k, 20k, 50k, 100k) for ID, HW and `out:0,1`, to test whether the gap closes with more data or targeted labels are genuinely more sample-efficient.
-4. **`HW3` on ASCADr** (running): does the coarse Hamming-weight label help there too, given that HW did better than expected? Also add `out:2,3` (class-count control) to the CNN sweep via `sweep.py --extend`.
+4. **Complete the CNN sweep's label set:** add `out:2,3` (class-count control) via `sweep.py --extend`.
 5. **CHES CTF:** the paper found networks there learn high vs low HW first and HW parity (even vs odd) later, so `HW3` and a HW-parity label are the natural candidates. The loader is implemented, but the downloaded CHES CTF file is a longer 15k-sample window, so it needs adjusting first.
 6. **Representations (the main longer-term question):** compare what networks trained on different leakage models learn internally. For example, do HW-trained and `out:0,1`-trained models embed the mask and masked-value shares differently? The starvation hypothesis makes a concrete prediction here: joint-label networks should show weaker or later-forming output-share features than `out:0,1` networks on the same run. We would reuse the paper's tools (probing hidden layers for share bits, perceived information, activation patching) on paired runs from these sweeps.
 
@@ -242,6 +251,10 @@ uv run scripts/sweep.py --dataset_path ascad-variable-desync50.h5 --model cnn --
 # eShard MLP sweep
 uv run scripts/sweep.py --dataset eshard --dataset_path eshard.h5 --n_train 30000 --n_attack 5000 \
     --n_runs 100 --epochs 30 --leakage_models ID HW HW3 --quiet
+
+# HW3 added to both ASCADr sweeps afterwards (same subsets and configs)
+uv run scripts/sweep.py --extend results/sweep_ascadr_27_09_2026_19_17_52 --leakage_models HW3 --quiet
+uv run scripts/sweep.py --extend results/sweep_ascadr_28_09_2026_08_50_36 --leakage_models HW3 --gpu_mem_budget 12 --quiet
 
 # Figures and tables in this doc
 uv run scripts/plot_sweep.py <sweep_dir> [--final-only] --out docs/figures/<name>

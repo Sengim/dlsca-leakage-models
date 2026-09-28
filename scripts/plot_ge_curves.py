@@ -4,8 +4,12 @@ Thin lines are individual runs, the band is the interquartile range across runs 
 median. Panels are ordered like plot_sweep.py (best median first). Leakage models whose GE cannot reach 0
 (S-box input terms: tied key guesses) get their floor drawn as a dashed line.
 
+--log-x puts the attack traces on a log axis; --log-y puts GE on a symmetric-log axis (linear 0..1, log above),
+so GE = 0 stays visible while the 1..32 range around the GE < 1 / GE < 32 thresholds is spread out.
+
 Example:
     uv run scripts/plot_ge_curves.py results/sweep_ascadr_27_09_2026_19_17_52 --checkpoint final
+    uv run scripts/plot_ge_curves.py results/sweep_ascadr_27_09_2026_19_17_52 --log-x --log-y
 """
 
 import argparse
@@ -35,7 +39,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("sweep_dir")
     parser.add_argument("--checkpoint", default="final", choices=["final", "best"])
-    parser.add_argument("--out", default=None, help="output path without extension (default: <sweep_dir>/ge_curves_<checkpoint>)")
+    parser.add_argument("--log-x", action="store_true", help="log scale for the number of attack traces")
+    parser.add_argument("--log-y", action="store_true", help="symmetric-log scale for GE (linear below 1)")
+    parser.add_argument("--out", default=None,
+                        help="output path without extension (default: <sweep_dir>/ge_curves_<checkpoint>[_logx][_logy])")
     args = parser.parse_args()
 
     with open(f"{args.sweep_dir}/args.json") as f:
@@ -71,9 +78,18 @@ def main():
             ax.axhline(floor, color=INK_MUTED, lw=1, ls="--")
             ax.annotate(f"floor {floor:g}", (n, floor), xytext=(0, 3), textcoords="offset points",
                         ha="right", va="bottom", fontsize=7.5, color=INK_MUTED)
-        ax.set_title(f"{m}  (median GE after all traces: {med[-1]:.0f})", fontsize=9.5, color=INK, loc="left")
-        ax.set_ylim(-5, 256)
-        ax.set_yticks([0, 64, 128, 192, 256])
+        ax.set_title(f"{m}  (median at end: {med[-1]:.0f})", fontsize=9.5, color=INK, loc="left")
+        if args.log_y:
+            ax.set_yscale("symlog", linthresh=1, linscale=0.5)
+            ax.set_ylim(0, 256)
+            ax.set_yticks([0, 1, 4, 16, 64, 256], ["0", "1", "4", "16", "64", "256"])
+            ax.yaxis.set_minor_locator(plt.NullLocator())
+        else:
+            ax.set_ylim(-5, 256)
+            ax.set_yticks([0, 64, 128, 192, 256])
+        if args.log_x:
+            ax.set_xscale("log")
+            ax.set_xlim(1, n)
         style(ax)
         ax.xaxis.grid(True, color=GRID, lw=0.8)
     for ax in axes.flat[len(models):]:
@@ -87,7 +103,8 @@ def main():
     fig.suptitle(f"{title_prefix(sweep_args)} sweep: GE of {label}, {len(runs)} runs per leakage model "
                  f"(line = median, band = IQR)", color=INK, fontsize=11, x=0.01, ha="left")
     fig.tight_layout()
-    out = args.out or f"{args.sweep_dir}/ge_curves_{args.checkpoint}"
+    suffix = ("_logx" if args.log_x else "") + ("_logy" if args.log_y else "")
+    out = args.out or f"{args.sweep_dir}/ge_curves_{args.checkpoint}{suffix}"
     for ext in ("png", "pdf"):
         fig.savefig(f"{out}.{ext}", dpi=200, bbox_inches="tight", facecolor="#fcfcfb")
     print(f"Saved {out}.png and {out}.pdf")

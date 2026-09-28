@@ -99,7 +99,8 @@ def train_and_evaluate(ds, leakage_model, train_idx, val_idx, cfg, device=None, 
     """Train an MLP or CNN (cfg.model) on ds.x_profiling[train_idx] labelled with leakage_model, then attack ds.x_attack.
 
     Returns a dict with the training history, GE curves and traces-to-GE<1 for both the final model
-    and the checkpoint with the lowest validation loss, and the state dict of the final model.
+    and the checkpoint with the lowest validation loss, and the state dict of the final model with its
+    input standardisation (input_mean, input_std).
     Both GE curves use the same attack-trace permutations. If training diverged (NaN outputs, or no
     finite validation loss for the best checkpoint), the affected GE curve is all NaN.
     On GPU, cfg.batch_size is halved until a training step fits in gpu_mem_budget_gib (see fit_batch_size);
@@ -169,6 +170,7 @@ def train_and_evaluate(ds, leakage_model, train_idx, val_idx, cfg, device=None, 
 
     ge_final = attack()
     final_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+    input_mean, input_std = mean.cpu(), std.cpu()  # needed to feed new traces to the saved model
     if best_state is None:
         ge_best = np.full(len(x_attack), np.nan)
     else:
@@ -188,4 +190,5 @@ def train_and_evaluate(ds, leakage_model, train_idx, val_idx, cfg, device=None, 
         "best_epoch": best_epoch,
         "batch_size": batch_size,
         "state_dict": final_state,
+        "input_mean": input_mean, "input_std": input_std,
     }

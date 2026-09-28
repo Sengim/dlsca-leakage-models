@@ -6,6 +6,8 @@ Motivation: Karayalcin et al., *Interpreting Emergent Features in Deep Learning-
 - What happens if we train only on those bits, or only on *other* bits?
 - Do bit-restricted labels need fewer profiling traces?
 
+Results so far: [docs/leakage_model_sweeps.md](docs/leakage_model_sweeps.md).
+
 ## Setup
 ```
 uv sync

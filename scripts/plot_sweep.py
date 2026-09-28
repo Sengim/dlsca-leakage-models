@@ -6,6 +6,8 @@ n_attack at the midline -> 0 at the bottom); runs that don't are placed by their
 
 Each violin is split: left half = best-val-loss checkpoint, right half = final epoch. Individual runs
 are overlaid as dots. Leakage models are ordered by decreasing median score of the best checkpoint.
+With --final-only, the best-val-loss checkpoint is dropped and each violin is a full final-epoch violin
+(models ordered by the final-epoch median instead); the GE < 32 layer then gets its own color.
 
 If the sweep tracked GE < 32 (ntge32_* columns), selected leakage models get a second layer at the
 same x: the runs that reach GE < 32, placed by their traces to GE < 32 (hatched outline, hollow dots,
@@ -14,6 +16,7 @@ e.g. in:0,1 bottoms out at 31.5) plus ID as a reference; override with --ge32.
 
 Example:
     uv run scripts/plot_sweep.py results/sweep_ascadr_27_09_2026_18_33_28
+    uv run scripts/plot_sweep.py results/sweep_ascadr_27_09_2026_18_33_28 --final-only
 """
 
 import argparse
@@ -26,7 +29,7 @@ import numpy as np
 
 from sca_tg.leakage import parse_leakage_model
 
-COLORS = {"best": "#2a78d6", "final": "#eb6834"}
+COLORS = {"best": "#2a78d6", "final": "#eb6834", "ge32": "#7b52c4"}
 LABELS = {"best": "best val-loss checkpoint", "final": "final epoch"}
 INK, INK_MUTED, GRID = "#1f1f1e", "#6b6a64", "#e4e3dd"
 
@@ -60,11 +63,13 @@ def load(sweep_dir):
 def half_violin(ax, values, x, side, color, hollow=False, width=0.8):
     values = np.asarray(values, dtype=float)
     values = values[np.isfinite(values)]
-    sign = -1 if side == "left" else 1
+    sign = {"left": -1, "right": 1, "both": 1}[side]
+    lo, hi = (-width / 2, width / 2) if side == "both" else sorted((0, sign * width / 2))
     if len(values) >= 2 and np.ptp(values) > 0:
         body = ax.violinplot(values, positions=[x], widths=width, showextrema=False)["bodies"][0]
         verts = body.get_paths()[0].vertices
-        verts[:, 0] = np.clip(verts[:, 0], -np.inf, x) if side == "left" else np.clip(verts[:, 0], x, np.inf)
+        if side != "both":
+            verts[:, 0] = np.clip(verts[:, 0], -np.inf, x) if side == "left" else np.clip(verts[:, 0], x, np.inf)
         body.set_edgecolor(color)
         body.set_linewidth(1)
         if hollow:
@@ -76,13 +81,17 @@ def half_violin(ax, values, x, side, color, hollow=False, width=0.8):
             body.set_facecolor(color)
             body.set_alpha(0.35)
     elif len(values):  # no spread to estimate a density from: draw a flat tick instead
-        ax.plot([x, x + sign * width / 2], [values[0]] * 2, color=color, lw=2, solid_capstyle="round",
+        ax.plot([x + lo, x + hi], [values[0]] * 2, color=color, lw=2, solid_capstyle="round",
                 ls="--" if hollow else "-")
     if len(values):
-        jitter = np.random.default_rng(1 if hollow else 0).uniform(0.05, 0.25, len(values)) * sign
+        rng = np.random.default_rng(1 if hollow else 0)
+        if side == "both":
+            jitter = rng.uniform(-0.2, 0.2, len(values))
+        else:
+            jitter = rng.uniform(0.05, 0.25, len(values)) * sign
         ax.scatter(x + jitter, values, s=18, zorder=3, linewidth=1 if hollow else 0.8,
                    color="white" if hollow else color, edgecolor=color if hollow else "white")
-        ax.plot([x, x + sign * 0.35], [np.median(values)] * 2, color=INK, lw=1.5, zorder=4, ls="--" if hollow else "-")
+        ax.plot([x + lo * 0.875, x + hi * 0.875], [np.median(values)] * 2, color=INK, lw=1.5, zorder=4, ls="--" if hollow else "-")
 
 
 def style(ax):
@@ -100,11 +109,16 @@ def main():
     parser.add_argument("sweep_dir")
     parser.add_argument("--ge32", nargs="*", default=None,
                         help="leakage models that get the GE<32 layer (default: models with an in: term, plus ID)")
-    parser.add_argument("--out", default=None, help="output path without extension (default: <sweep_dir>/violins)")
+    parser.add_argument("--final-only", action="store_true",
+                        help="drop the best-val-loss checkpoint and plot full final-epoch violins")
+    parser.add_argument("--out", default=None,
+                        help="output path without extension (default: <sweep_dir>/violins[_final])")
     args = parser.parse_args()
 
     data, n_attack = load(args.sweep_dir)
-    models = sorted(data, key=lambda m: -np.nanmedian(data[m][(1, "best")]))
+    checkpoints = [("final", "both")] if args.final_only else [("best", "left"), ("final", "right")]
+    order_by = checkpoints[0][0]
+    models = sorted(data, key=lambda m: -np.nanmedian(data[m][(1, order_by)]))
     has_ge32 = bool(data[models[0]][(32, "best")])
 
     if args.ge32 is None:
@@ -121,11 +135,12 @@ def main():
     for x, m in zip(xs, models):
         counts = []
         for t in thresholds_for(m):
-            for which, side in (("best", "left"), ("final", "right")):
-                half_violin(ax, data[m][(t, which)], x, side, COLORS[which], hollow=t != 1)
-            n = len(data[m][(t, "best")])
-            broke = [int((np.asarray(data[m][(t, w)]) <= 1).sum()) for w in ("best", "final")]
-            counts.append(f"<{t}: {broke[0]}/{n} | {broke[1]}/{n}")
+            for which, side in checkpoints:
+                color = COLORS["ge32"] if args.final_only and t != 1 else COLORS[which]
+                half_violin(ax, data[m][(t, which)], x, side, color, hollow=t != 1)
+            n = len(data[m][(t, "final")])
+            broke = [int((np.asarray(data[m][(t, w)]) <= 1).sum()) for w, _ in checkpoints]
+            counts.append(f"<{t}: " + " | ".join(f"{b}/{n}" for b in broke))
         ax.annotate("\n".join(counts), (x, 0), xytext=(0, -4), textcoords="offset points",
                     ha="center", va="top", fontsize=7.5, color=INK_MUTED, linespacing=1.3)
 
@@ -142,20 +157,21 @@ def main():
     ax.tick_params(axis="x", length=0, pad=24 if any(len(thresholds_for(m)) > 1 for m in models) else 14)
     ax.set_xlim(-0.6, len(models) - 0.4)
     style(ax)
-    ax.text(1.0, -0.14, "runs reaching threshold: best | final", transform=ax.transAxes, ha="right",
+    ax.text(1.0, -0.14, "runs reaching threshold: " + " | ".join(w for w, _ in checkpoints), transform=ax.transAxes, ha="right",
             fontsize=8, color=INK_MUTED)
 
-    handles = [plt.Line2D([], [], marker="o", ls="", color=COLORS[w], label=LABELS[w]) for w in ("best", "final")]
+    handles = [plt.Line2D([], [], marker="o", ls="", color=COLORS[w], label=LABELS[w]) for w, _ in checkpoints]
     handles.append(plt.Line2D([], [], color=INK, lw=1.5, label="GE < 1 (filled)"))
     if any(32 in thresholds_for(m) for m in models):
-        handles.append(plt.Line2D([], [], color=INK, lw=1.5, ls="--", marker="o", markerfacecolor="white",
+        ge32_color = COLORS["ge32"] if args.final_only else INK
+        handles.append(plt.Line2D([], [], color=ge32_color, lw=1.5, ls="--", marker="o", markerfacecolor="white",
                                   label="GE < 32 (hatched, hollow)"))
     ax.legend(handles=handles, loc="upper right", frameon=False, fontsize=9, labelcolor=INK)
     first = next(iter(data.values()))
-    ax.set_title(f"ASCADr sweep: {len(first[(1, 'best')])} runs per leakage model (random subsets + hyperparameters)",
+    ax.set_title(f"ASCADr sweep: {len(first[(1, 'final')])} runs per leakage model (random subsets + hyperparameters)",
                     color=INK, fontsize=11, loc="left")
 
-    out = args.out or f"{args.sweep_dir}/violins"
+    out = args.out or f"{args.sweep_dir}/violins{'_final' if args.final_only else ''}"
     for ext in ("png", "pdf"):
         fig.savefig(f"{out}.{ext}", dpi=200, bbox_inches="tight", facecolor="#fcfcfb")
     print(f"Saved {out}.png and {out}.pdf")

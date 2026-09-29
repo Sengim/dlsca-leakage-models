@@ -1,7 +1,7 @@
-"""Linear probes for the shares of the target byte in networks from a sweep (ASCADr for now).
+"""Linear probes for the shares of the target byte in networks from a sweep (ASCADr or eShard).
 
 Models: a paired set (the first --n_models runs in which --reference breaks the key, every leakage model trained
-on each) and a best set (the --n_models lowest-GE runs per leakage model). The sweeps don't store weights, so each
+on each) and a best set (the --n_models lowest-GE runs per leakage model); --sets picks which. The sweeps don't store weights, so each
 model is retrained from its saved subset and config (exact for MLPs; the retrained GE is checked against the
 sweep's) and cached under <out>/models. Every layer of the trained network and of the same network at its
 initialisation (the baseline) is probed on --n_probe profiling traces the model never trained on (a fixed random
@@ -13,6 +13,7 @@ there are skipped, so a stopped run resumes.
 
 Example:
     uv run scripts/probe_sweep.py results/sweep_ascadr_27_09_2026_19_17_52
+    uv run scripts/probe_sweep.py results/sweep_eshard_28_09_2026_15_36_15 --sets best
 """
 
 import argparse
@@ -27,7 +28,7 @@ from plot_sweep import score
 from sca_tg.datasets import load_dataset
 from sca_tg.leakage import parse_leakage_model
 from sca_tg.probing import layer_outputs, probe_layer, probe_targets, split_indices
-from sca_tg.shares import ascadr_shares
+from sca_tg.shares import ascadr_shares, eshard_shares
 from sca_tg.train import TrainConfig, build_model, train_and_evaluate
 
 FIELDS = ["leakage_model", "run", "in_paired", "in_best", "model_ge_final", "network", "layer", "layer_index",
@@ -38,15 +39,18 @@ def num(v):
     return float(v) if v not in ("", None) else np.nan
 
 
-def select_models(rows, n_attack, reference, n_models, labels):
+SHARES = {"ascadr": ascadr_shares, "eshard": eshard_shares}
+
+
+def select_models(rows, n_attack, reference, n_models, labels, sets):
     """{(leakage model, run): (in_paired, in_best)}."""
     by = {}
     for r in rows:
         by.setdefault(r["leakage_model"], {})[int(r["run"])] = score(num(r["ge_final"]), num(r["ntge_final"]), n_attack)
-    paired_runs = sorted(i for i, s in by[reference].items() if s <= 1)[:n_models]
+    paired_runs = sorted(i for i, s in by[reference].items() if s <= 1)[:n_models] if "paired" in sets else []
     sel = {}
     for lm in labels:
-        best = sorted(by[lm], key=lambda i: by[lm][i])[:n_models]
+        best = sorted(by[lm], key=lambda i: by[lm][i])[:n_models] if "best" in sets else []
         for i in set(paired_runs) | set(best):
             sel[(lm, i)] = (i in paired_runs, i in best)
     return sel
@@ -59,21 +63,23 @@ def main():
                         help="leakage models to probe (default: every one with results for all runs)")
     parser.add_argument("--reference", default="out:0,1", help="leakage model whose successful runs form the paired set")
     parser.add_argument("--n_models", type=int, default=10)
+    parser.add_argument("--sets", nargs="+", default=["paired", "best"], choices=["paired", "best"])
     parser.add_argument("--n_probe", type=int, default=40000, help="probe traces per model (fit / val / test 60/15/25)")
     parser.add_argument("--out", default=None, help="default: results/probes_<sweep dir name>")
     args = parser.parse_args()
 
     with open(f"{args.sweep_dir}/args.json") as f:
         sweep = json.load(f)
-    if sweep.get("dataset", "ascadr") != "ascadr":
-        raise SystemExit("share definitions are only implemented for ASCADr so far")
+    dataset = sweep.get("dataset", "ascadr")
+    if dataset not in SHARES:
+        raise SystemExit(f"no share definitions for {dataset}")
     with open(f"{args.sweep_dir}/summary.csv") as f:
         rows = list(csv.DictReader(f))
     n_runs = len(sweep["runs"])
     counts = {lm: sum(r["leakage_model"] == lm for r in rows) for lm in sweep["leakage_models"]}
     labels = args.labels or [lm for lm, c in counts.items() if c == n_runs]
     print("leakage models:", labels, "| skipped (incomplete):", [lm for lm in counts if lm not in labels])
-    sel = select_models(rows, sweep["n_attack"], args.reference, args.n_models, labels)
+    sel = select_models(rows, sweep["n_attack"], args.reference, args.n_models, labels, args.sets)
     ge_sweep = {(r["leakage_model"], int(r["run"])): num(r["ge_final"]) for r in rows}
 
     out = args.out or f"results/probes_{os.path.basename(os.path.normpath(args.sweep_dir))}"
@@ -87,7 +93,7 @@ def main():
         with open(csv_path, "w", newline="") as f:
             csv.DictWriter(f, FIELDS).writeheader()
 
-    ds = load_dataset("ascadr", sweep["dataset_path"], n_profiling=sweep["n_profiling"], n_attack=sweep["n_attack"],
+    ds = load_dataset(dataset, sweep["dataset_path"], n_profiling=sweep["n_profiling"], n_attack=sweep["n_attack"],
                       target_byte=sweep["target_byte"])
     val_idx = np.arange(len(ds.x_profiling) - sweep["n_validation"], len(ds.x_profiling))
     splits = split_indices(args.n_probe)
@@ -114,9 +120,9 @@ def main():
 
         unseen = np.setdiff1d(np.arange(len(ds.x_profiling)), train_idx)
         probe_idx = np.sort(np.random.default_rng(i).choice(unseen, args.n_probe, replace=False))
-        groups = ascadr_shares(ds.profiling_plaintexts[probe_idx], ds.profiling_keys[probe_idx],
-                               ds.profiling_masks[probe_idx], sweep["target_byte"])
-        groups.pop("wrong mask")
+        groups = SHARES[dataset](ds.profiling_plaintexts[probe_idx], ds.profiling_keys[probe_idx],
+                                 ds.profiling_masks[probe_idx], sweep["target_byte"])
+        groups.pop("wrong mask", None)
         group_of = {v: g for g, vs in groups.items() for v in vs}
         targets = probe_targets({v: x for vs in groups.values() for v, x in vs.items()})
         x = (torch.from_numpy(ds.x_profiling[probe_idx]) - saved["input_mean"]) / saved["input_std"]

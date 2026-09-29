@@ -8,9 +8,9 @@
 - **It is the specific bits, not the number of classes.** `out:2,3` is also a 4-class label, trained on identical data and hyperparameters, and only 18/100 MLP runs break the key. Dropping the LSBs (`out:2,3,4,5,6,7`) leaves 4/100.
 - **The S-box input bits only ever get us to GE < 32, and adding them to `out:0,1` makes attacks worse.** That first part is expected: they depend on 2 key bits, so they can only find the right group of 64 keys. The surprise is the joint 16-class `out:0,1+in:0,1` label: it breaks the key less often than `out:0,1` alone (MLP 43 vs 90/100, CNN 12 vs 18/100) and is *slower* when both succeed (42 of 43 MLP runs). Our working hypothesis is that the much easier input-share feature starves learning of the output bits (see [Takeaways](#takeaways)).
 - **The same idea works on eShard with Hamming weights.** The paper found that eShard networks first learn to tell high from low Hamming weights. Training directly on that coarse 3-class label (`HW3`: low / med / high HW) breaks eShard in 79/100 MLP runs, against 30/100 for HW and 2/100 for ID, and wins 90/100 paired runs against HW. On ASCADr MLPs it is second only to `out:0,1` (81/100, against 29 for HW); on desync CNNs it either breaks the key or ends up confidently wrong.
-- **Probing shows different labels build on different shares.** In ASCADr MLPs, `out:0,1` networks amplify the bits of the remasked S-box output pair (r[2], Sbox⊕r[2]), while HW-type networks amplify Hamming weights and are the only ones to pick up the r_out mask. Joint-label networks learn the input-mask pair as well as `in:0,1` networks but the output pair more weakly, which supports the starvation hypothesis directly.
+- **Probing shows different labels build on different shares.** In ASCADr MLPs, `out:0,1` networks amplify the bits of the remasked S-box output pair (r[2], Sbox⊕r[2]), while HW-type networks amplify Hamming weights and are the only ones to pick up the r_out mask. Joint-label networks learn the input-mask pair as well as `in:0,1` networks but the output pair more weakly, which supports the starvation hypothesis directly. On eShard, HW-type networks roughly double how well both shares' Hamming weights can be read out, and `HW3` networks keep that deeper.
 - **Many desync CNNs are confidently wrong:** their GE ends *above* 128, i.e. worse than a random guess. This affects 75/100 joint-label models and none of the HW models, and also half of the ID-trained eShard MLPs. It is not understood yet.
-- **Open:** the data-efficiency question needs a sweep over the number of profiling traces, and the probing so far covers only ASCADr MLPs (see [Next steps](#next-steps)).
+- **Open:** the data-efficiency question needs a sweep over the number of profiling traces, and the probing so far covers only MLPs (see [Next steps](#next-steps)).
 
 ## Motivation
 
@@ -196,9 +196,11 @@ Paired against `HW3` (same subset and hyperparameters, final epoch): `HW3` is be
 
 </details>
 
-## Probing: what the networks encode (ASCADr MLPs)
+## Probing: what the networks encode
 
-The attack results say which labels work, not what the networks learn. As a first step towards the representation question, we probe the hidden layers of ASCADr MLPs for the masking shares of the target byte.
+The attack results say which labels work, not what the networks learn. As a first step towards the representation question, we probe the hidden layers of the ASCADr and eShard MLPs for the masking shares of the target byte.
+
+### ASCADr MLPs
 
 **Models.** The *paired set*: runs 0–9 (the first 10 runs in which `out:0,1` breaks the key), with all 8 leakage models trained on each, so differences come from the label alone. A *best-10 set* (each leakage model's 10 lowest-GE runs) is in the collapsed section below. The sweeps don't store weights, so every model was retrained from its saved subset and configuration; all 142 reproduce their sweep GE exactly.
 
@@ -214,7 +216,7 @@ The attack results say which labels work, not what the networks learn. As a firs
 
 *Absolute probe accuracy at hidden layer 1 and at each model's last hidden layer, mean ± s.e. over the 10 paired runs. The grey mark is the untrained network at hidden layer 1; untrained networks also lose share information with depth, so part of the drop to the last hidden layer is depth rather than training.*
 
-### What this says
+#### What this says
 
 **1. The two output share pairs leak differently, and different labels use different ones.** ASCADr has two masked versions of the S-box output: `Sbox(p⊕k)⊕r_out` at the masked table lookup and `Sbox(p⊕k)⊕r[2]` after remasking with the state mask. At initialisation, r[2] and `S⊕r[2]` leak *individual bits* (bit 0 about 64–65% decodable), while r_out leaks almost only its *Hamming weight* (bits about 54%, high/low 66%). The labels split along this line:
 
@@ -244,11 +246,27 @@ This is a first concrete case of different leakage models building on different 
 
 </details>
 
+### eShard MLPs (best-10)
+
+eShard has a single masked S-box output. Of its two metadata mask bytes, `m[1]` and `Sbox(p⊕k)⊕m[1]` leak strongly (max SNR 0.37 / 0.36, about 85× the noise floor), while `m[0]`, every input share and the unmasked values stay at the floor. So there is one share pair, (`m[1]`, `S⊕m[1]`), and no input shares. We probed each leakage model's 10 lowest-GE runs; all HW and `HW3` models break the key, the best ID models don't (median GE 12.5).
+
+![Probe gains over initialisation per leakage model, eShard best-10 set](figures/probes_eshard_mlp_best_gains.png)
+
+![Probe accuracy per leakage model, eShard best-10 set](figures/probes_eshard_mlp_best_accuracy.png)
+
+- **Both shares leak as Hamming weights.** At initialisation, every bit of `m[1]` and `S⊕m[1]` is about 57–58% decodable, high/low 73–76% and HW R² 0.25–0.34: the leakage is HW-like, with no bit standing out (unlike ASCADr's remasked pair).
+- **HW and `HW3` networks amplify exactly that.** In hidden 1 they roughly double the linear decodability of both shares' HW (R² +31 to +36, to about 0.65) and raise high/low from about 75% to 89–90%. All bits rise evenly (+3.7 to +4.6), as expected when a layer encodes the HW rather than particular bits.
+- **`HW3` keeps the share HW deeper.** At the last hidden layer, `HW3` networks still decode `m[1]`'s high/low HW at 82% (HW networks 77%) with HW R² +23.5 over init (HW +9.1), and similarly for `S⊕m[1]` (+23.0 vs +11.7). This mirrors ASCADr, where only `HW3` networks kept the `S⊕r_out` HW into hidden 2.
+- **The combined value is encoded as a coarse HW.** At the last hidden layer, the unmasked high/low HW is decodable at 55.3% (`HW3`) and 54.7% (HW), while its bits sit at about 51.6% with no bit standing out.
+- **ID networks learn nothing share-related.** Their hidden 1 is indistinguishable from initialisation and deeper layers lose share information, consistent with ID failing on eShard.
+
+This fits the paper's observation that eShard networks first learn to separate high from low Hamming weights: the networks that do so amplify the Hamming weights of the individual shares, and the coarse `HW3` label keeps those share features further into the network.
+
 ### Caveats for the probes
 
 - **Correlated targets.** A network that encodes a byte's HW also partly predicts its individual bits (bit from HW alone: 63.7%), and bits partly predict high/low. Bit-level and HW-level encodings aren't separated yet; the correlation ceilings are the next step.
 - **Small effects.** Gains on the unmasked values are a few points; the label rankings rest on differences of 1–2 points (standard errors are shown in the accuracy figure).
-- **Linear probes, ASCADr MLPs only.** CNNs and eShard are not probed yet; eShard's two mask bytes need identifying first.
+- **Linear probes, MLPs only.** The CNNs are not probed yet.
 
 ## Takeaways
 
@@ -263,9 +281,9 @@ This is a first concrete case of different leakage models building on different 
 
 **4. Working hypothesis: the easy input-share feature starves learning of the output bits.** The SNR check shows why the input bits are so easy on synchronised traces: the masked S-box input `p⊕k⊕r_in` leaks with SNR ~9.7, against ~1.3–1.5 for the masked S-box outputs. With the joint label, the network can cut the loss a lot by learning the input share pair (r_in, `p⊕k⊕r_in`) first. That leaves less gradient pressure and, in small networks, less capacity for the harder output share pair (r_out or r[2] with the masked S-box output). With `out:0,1` alone the shortcut does not exist.
 
-The probes confirm it at the share level (see [Probing](#probing-what-the-networks-encode-ascadr-mlps)): joint-label networks learn the input-mask pair as strongly as `in:0,1` networks but the remasked output pair much more weakly than `out:0,1` networks. The MLP GE curves fit this too. The joint label's median GE drops fast early (28 after 100 traces, when `out:0,1` is still at 69), which is the input bits finding the key group. But then it stalls: 14 vs 5 after 1000 traces, 7.6 vs 0.3 after 2000. The output-bit part of the joint model is weaker than a model trained on the output bits alone.
+The probes confirm it at the share level (see [Probing](#probing-what-the-networks-encode)): joint-label networks learn the input-mask pair as strongly as `in:0,1` networks but the remasked output pair much more weakly than `out:0,1` networks. The MLP GE curves fit this too. The joint label's median GE drops fast early (28 after 100 traces, when `out:0,1` is still at 69), which is the input bits finding the key group. But then it stalls: 14 vs 5 after 1000 traces, 7.6 vs 0.3 after 2000. The output-bit part of the joint model is weaker than a model trained on the output bits alone.
 
-**5. Different leakage models build on different shares.** The probes show `out:0,1` networks using bit-level features of the remasked output pair (r[2], Sbox⊕r[2]), and HW-type networks using Hamming-weight features of both output pairs, including the r_out mask, which only leaks through its HW. This matches how each pair leaks, and is a first answer to the representation question.
+**5. Different leakage models build on different shares.** The probes show `out:0,1` networks using bit-level features of the remasked output pair (r[2], Sbox⊕r[2]), and HW-type networks using Hamming-weight features of both output pairs, including the r_out mask, which only leaks through its HW. This matches how each pair leaks, and is a first answer to the representation question. On eShard, whose single share pair leaks as Hamming weights, HW and `HW3` networks amplify exactly those share Hamming weights, and `HW3` networks keep them deeper into the network, as on ASCADr.
 
 **6. Checkpoint selection matters and neither choice is right.** Validation loss picks essentially untrained MLPs (epoch 0–1). For CNNs it picks a mid-training epoch that is more reliable but breaks the key less often than the final epoch. A GE-based criterion on a held-out attack set would be fairer to both.
 
@@ -293,7 +311,7 @@ One clue: the state also appears early in training for synchronised MLPs that en
 3. **Data efficiency:** sweep the number of training traces (e.g. 5k, 10k, 20k, 50k, 100k) for ID, HW and `out:0,1`, to test whether the gap closes with more data or targeted labels are genuinely more sample-efficient.
 4. **Complete the CNN sweep's label set:** add `out:2,3` (class-count control) via `sweep.py --extend`.
 5. **CHES CTF:** the paper found networks there learn high vs low HW first and HW parity (even vs odd) later, so `HW3` and a HW-parity label are the natural candidates. The loader is implemented, but the downloaded CHES CTF file is a longer 15k-sample window, so it needs adjusting first.
-6. **Representations (continued):** separate bit-level from HW-level encodings with correlation ceilings; probe the CNNs and eShard (after identifying its mask bytes); probe over training to see when each share feature forms; and test whether output bit 0 alone (`out:0`) matches `out:0,1`, given how much bit 0 dominates. Beyond linear probes, the paper's tools (perceived information, activation patching) on the same paired runs.
+6. **Representations (continued):** separate bit-level from HW-level encodings with correlation ceilings; probe the CNNs; probe over training to see when each share feature forms; and test whether output bit 0 alone (`out:0`) matches `out:0,1`, given how much bit 0 dominates. Beyond linear probes, the paper's tools (perceived information, activation patching) on the same paired runs.
 
 ## Reproducing
 
@@ -313,10 +331,13 @@ uv run scripts/sweep.py --dataset eshard --dataset_path eshard.h5 --n_train 3000
 uv run scripts/sweep.py --extend results/sweep_ascadr_27_09_2026_19_17_52 --leakage_models HW3 --quiet
 uv run scripts/sweep.py --extend results/sweep_ascadr_28_09_2026_08_50_36 --leakage_models HW3 --gpu_mem_budget 12 --quiet
 
-# Probing (ASCADr MLPs; retrains and caches the selected models, resumable)
+# Probing (retrains and caches the selected models, resumable)
 uv run scripts/probe_sweep.py results/sweep_ascadr_27_09_2026_19_17_52
+uv run scripts/probe_sweep.py results/sweep_eshard_28_09_2026_15_36_15 --sets best
 uv run scripts/plot_probes.py results/probes_sweep_ascadr_27_09_2026_19_17_52/probes.csv --set {paired,best} \
     --out docs/figures/probes_ascadr_mlp_<set>
+uv run scripts/plot_probes.py results/probes_sweep_eshard_28_09_2026_15_36_15/probes.csv --set best \
+    --title "eShard MLPs" --out docs/figures/probes_eshard_mlp_best
 
 # Figures and tables in this doc
 uv run scripts/plot_sweep.py <sweep_dir> [--final-only] --out docs/figures/<name>

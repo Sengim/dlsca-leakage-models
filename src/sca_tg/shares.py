@@ -45,3 +45,15 @@ def snr(traces, labels):
     means = sums / counts[:, None]
     variances = sq / counts[:, None] - means ** 2
     return means.var(axis=0) / variances.mean(axis=0)
+
+
+def eshard_shares(plaintexts, keys, masks, target_byte):
+    """name -> (n,) uint8 values of the target byte's shares on eShard, grouped like ascadr_shares.
+
+    eShard metadata has 2 mask bytes. On eshard.h5 (60k profiling traces), masks[:, 1] and Sbox(p^k) ^ masks[:, 1]
+    leak strongly (max SNR 0.37 / 0.36, ~85x the noise floor), while masks[:, 0], every input share p^k ^ m and
+    the unmasked values stay at the floor: masks[:, 1] is the S-box output mask and there are no input shares.
+    """
+    z = AES_SBOX[plaintexts[:, target_byte] ^ keys[:, target_byte]]
+    m = masks[:, 1]
+    return {"masks": {"m[1]": m}, "masked values": {"Sbox(p^k) ^ m[1]": z ^ m}, "unmasked": {"Sbox(p^k)": z}}

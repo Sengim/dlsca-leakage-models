@@ -18,6 +18,10 @@ already in summary.csv are skipped. Without --leakage_models it continues the sw
 i.e. resumes a stopped or interrupted sweep. Don't extend a running sweep.
     uv run scripts/sweep.py --extend results/sweep_ascadr_27_09_2026_19_17_52 --leakage_models "out:4,5" --quiet
     uv run scripts/sweep.py --extend results/sweep_ascadr_28_09_2026_08_50_36 --quiet  # resume
+--extend with --n_runs N (more than the sweep has) adds runs up to N in total, for all of the sweep's leakage
+models plus any new --leakage_models. The new runs continue the sweep's seeded draws, so they are the runs a
+fresh sweep with --n_runs N would have drawn.
+    uv run scripts/sweep.py --extend results/sweep_ascadr_27_09_2026_19_17_52 --n_runs 16 --quiet
 """
 
 import argparse
@@ -114,7 +118,9 @@ def get_arguments():
                         help=f"default: {' '.join(DEFAULT_LEAKAGE_MODELS)}; with --extend, the sweep's own")
     parser.add_argument("--n_train", type=int, default=20000)
     parser.add_argument("--model", default="mlp", choices=["mlp", "cnn"])
-    parser.add_argument("--n_runs", type=int, default=8, help="random (subset, hyperparameter) draws per leakage model")
+    parser.add_argument("--n_runs", type=int, default=None,
+                        help="random (subset, hyperparameter) draws per leakage model (default: 8); with --extend, "
+                             "the total number of runs to grow the sweep to")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--seed", type=int, default=0, help="seed for drawing subsets and hyperparameters")
     parser.add_argument("--fix", default=None,
@@ -142,10 +148,23 @@ def load_validation(args):
     return ds, val_idx, n_candidates
 
 
+def draw_runs(args, candidates, n_runs):
+    """Draw (run, train_idx, config) for runs 0..n_runs-1. Deterministic in args.seed, so run i is the same
+    whatever n_runs is."""
+    n_train = min(args.n_train, len(candidates))
+    rng = np.random.default_rng(args.seed)
+    runs = []
+    for i in range(n_runs):
+        train_idx = np.sort(rng.choice(candidates, size=n_train, replace=False))
+        runs.append((i, train_idx, sample_config(rng, args.epochs, seed=args.seed * 1000 + i, model=args.model)))
+    return runs
+
+
 def new_sweep(args):
     """Create a sweep dir and draw its runs. Returns (sweep_dir, ds, val_idx, runs, fields, done)."""
     args.dataset_path = args.dataset_path or default_path(args.dataset)
     args.leakage_models = args.leakage_models or DEFAULT_LEAKAGE_MODELS
+    args.n_runs = args.n_runs or 8
     ds, val_idx, n_candidates = load_validation(args)  # before creating the sweep dir, so a bad path leaves nothing behind
     # record what was actually loaded (smaller datasets, e.g. CHES CTF, have fewer traces than the defaults)
     for k, x in (("n_profiling", ds.x_profiling), ("n_attack", ds.x_attack)):
@@ -164,11 +183,8 @@ def new_sweep(args):
     os.makedirs(sweep_dir, exist_ok=True)
 
     # Draw all runs up front so they are identical across leakage models.
-    rng = np.random.default_rng(args.seed)
-    runs = []
-    for i in range(args.n_runs):
-        train_idx = np.sort(rng.choice(candidates, size=n_train, replace=False))
-        runs.append((i, train_idx, sample_config(rng, args.epochs, seed=args.seed * 1000 + i, model=args.model)))
+    runs = draw_runs(args, candidates, args.n_runs)
+    for i, train_idx, _ in runs:
         np.save(f"{sweep_dir}/train_idx_run{i}.npy", train_idx)
     with open(f"{sweep_dir}/args.json", "w") as f:
         search_space = CNN_SEARCH_SPACE if args.model == "cnn" else SEARCH_SPACE
@@ -187,23 +203,42 @@ def extend_sweep(args):
         saved = json.load(f)
     new_lms = args.leakage_models = args.leakage_models or saved["leakage_models"]  # none given: resume
     dataset_path = args.dataset_path
-    for k in ("dataset_path", "n_profiling", "n_attack", "n_validation", "target_byte", "fix", "seed"):
+    for k in ("dataset_path", "n_profiling", "n_attack", "n_validation", "target_byte", "fix", "seed", "n_train",
+              "epochs"):
         setattr(args, k, saved[k])
     args.dataset_path = dataset_path or args.dataset_path
     args.model = saved.get("model", "mlp")  # sweeps from before --model are MLP sweeps
     args.dataset = saved.get("dataset", "ascadr")  # ... and ASCADr sweeps
 
     runs = [(i, np.load(f"{sweep_dir}/train_idx_run{i}.npy"), TrainConfig(**c)) for i, c in enumerate(saved["runs"])]
+    if args.n_runs is not None and args.n_runs < len(runs):
+        raise SystemExit(f"--n_runs {args.n_runs} is fewer than the sweep's {len(runs)} runs")
     with open(f"{sweep_dir}/summary.csv", newline="") as f:
         reader = csv.DictReader(f)
         fields = reader.fieldnames  # older sweeps have fewer columns; keep the file's own header
         done = {(r["leakage_model"], int(r["run"])) for r in reader}
 
     saved["leakage_models"] += [lm for lm in new_lms if lm not in saved["leakage_models"]]
+    ds, val_idx, n_candidates = load_validation(args)
+
+    if args.n_runs is not None and args.n_runs > len(runs):
+        # Replay the sweep's draws and continue them; the replayed runs must match the saved ones (they won't
+        # if e.g. the search space changed since the sweep was made).
+        drawn = draw_runs(args, restrict_to_fixed(ds, np.arange(n_candidates), args.fix), args.n_runs)
+        for (i, idx, cfg), (_, idx2, cfg2) in zip(runs, drawn):
+            if not np.array_equal(idx, idx2) or cfg != cfg2:
+                raise SystemExit(f"re-drawing the sweep's runs doesn't reproduce run {i}; can't add runs")
+        for i, train_idx, cfg in drawn[len(runs):]:
+            np.save(f"{sweep_dir}/train_idx_run{i}.npy", train_idx)
+            saved["runs"].append(asdict(cfg))
+        print(f"Added runs {len(runs)}-{args.n_runs - 1}")
+        runs = drawn
+        new_lms = saved["leakage_models"]  # new runs are for every leakage model
+        args.leakage_models = new_lms
+    saved["n_runs"] = len(runs)
     with open(f"{sweep_dir}/args.json", "w") as f:
         json.dump(saved, f, indent=2)
 
-    ds, val_idx, _ = load_validation(args)
     todo = sum((lm, i) not in done for lm in new_lms for i, _, _ in runs)
     print(f"Extending {sweep_dir} ({args.model}, {args.dataset} at {args.dataset_path}): {todo} runs to train, "
           f"{len(new_lms) * len(runs) - todo} already in summary.csv")
